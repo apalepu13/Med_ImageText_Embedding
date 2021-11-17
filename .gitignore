@@ -1,0 +1,4 @@
+data/*
+*.sh
+slurm/*
+slurm_logs/*
