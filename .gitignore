@@ -1,4 +1,6 @@
 data/*
+*.out
+*.err
 *.sh
 slurm/*
 slurm_logs/*
