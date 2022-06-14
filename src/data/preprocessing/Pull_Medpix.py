@@ -4,8 +4,6 @@ import pandas as pd
 import re
 import urllib.request as ur
 
-
-
 maxes = np.arange(100, 8200, 100)
 urls = []
 for m in maxes:

@@ -4,7 +4,6 @@ import CNN
 import Transformer
 import numpy as np
 import Vision_Transformer
-import time
 
 class JointEmbeddingModel(nn.Module):
     def __init__(self, embed_dim, use_vit = False, imagenet = True):

@@ -6,7 +6,7 @@ print("CUDA Available: " + str(torch.cuda.is_available()))
 import torch.nn as nn
 from Transformer import *
 from jointEmbedding import JointEmbeddingModel
-from Pretraining import *
+from HelperFunctions import *
 import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -116,7 +116,7 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model_path', type=str, default='../../../models/je_model/', help='path for saving trained models')
+    parser.add_argument('--model_path', type=str, default='/n/data2/hms/dbmi/beamlab/anil/Med_ImageText_Embedding/models/je_model/', help='path for saving trained models')
     parser.add_argument('--log_step', type=int, default=100000, help='step size for printing log info')
     parser.add_argument('--val_step', type=int, default=2, help='step size for printing val info')
     parser.add_argument('--resume', type=bool, default=False, const=True, nargs='?')
@@ -127,7 +127,7 @@ if __name__ == '__main__':
     parser.add_argument('--synthetic', type =bool, default=False, const=True, nargs='?', help='Train on synthetic dataset')
 
     # Model parameters
-    parser.add_argument('--embed_size', type=int, default=512, help='dimension of word embedding vectors')
+    parser.add_argument('--embed_size', type=int, default=128, help='dimension of word embedding vectors')
     parser.add_argument('--num_epochs', type=int, default=100)
     parser.add_argument('--batch_size', type=int, default=32) #32 vs 16
     parser.add_argument('--learning_rate', type=float, default=.0001) #.0001

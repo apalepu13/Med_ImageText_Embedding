@@ -53,7 +53,8 @@ class CNN_Classifier(nn.Module):
 class CNN_Similarity_Classifier(nn.Module):
     def __init__(self, cnn_model,transformer_model, tokenizer, embed_size=512, freeze=True,
                heads=np.array(['Cardiomegaly', 'Edema', 'Consolidation', 'Atelectasis', 'Pleural Effusion'])
-               , use_convirt=False, device='cuda', get_num=3, avg_embedding=True, use_covid=False):
+               , use_convirt=False, device='cuda', get_num=20, avg_embedding=True, soft=False):
+
         super().__init__()
         if freeze:
             for param in cnn_model.parameters():
@@ -65,10 +66,12 @@ class CNN_Similarity_Classifier(nn.Module):
         self.heads = heads
         self.device = device
         self.tembed, self.tlab = Transformer.getTextEmbeddings(heads=self.heads, transformer=self.transformer_model, tokenizer=self.tokenizer,
-                                                               use_convirt=use_convirt, device=device, use_covid= use_covid,
+                                                               use_convirt=use_convirt, device=device,
                                                                get_num=get_num)
         self.get_num = get_num
         self.avg_embedding = avg_embedding
+        self.softmax = nn.Softmax(dim=1)
+        self.soft = soft
     def forward(self, image):
         embedding = self.cnn_model(image)
         embedding = embedding / embedding.norm(dim=-1, keepdim=True)
@@ -79,6 +82,7 @@ class CNN_Similarity_Classifier(nn.Module):
             if self.avg_embedding:
                 if self.get_num > 1:
                     tembed = tembed.mean(dim=0)
+                tembed = tembed/tembed.norm(dim=-1, keepdim=True)
                 head_sim = embedding @ tembed.t()
                 head_sim = head_sim.squeeze()
                 class_score[:, i] = head_sim
@@ -86,11 +90,13 @@ class CNN_Similarity_Classifier(nn.Module):
                 head_sims = embedding @ tembed.t()
                 if self.get_num > 1:
                     class_score[:, i] = head_sims.mean().squeeze()
+        if self.soft:
+            return self.softmax(class_score)
+        else:
+            return class_score
 
-        return class_score
 
-
-#cn = CNN_Embeddings(100)
+#Outputs pred probabilities
 def getVisionClassifier(modpath, mod="", device='cuda', embed_size=512,
                 heads = np.array(['Cardiomegaly', 'Edema', 'Consolidation', 'Atelectasis', 'Pleural Effusion']),
                         je=False, getFrozen=True, add_finetune=False):
@@ -98,10 +104,12 @@ def getVisionClassifier(modpath, mod="", device='cuda', embed_size=512,
         loadpath=modpath + 'finetuned_' + mod
     else:
         loadpath = modpath + mod
+
     if device == 'cuda':
         checkpoint = torch.load(loadpath)
     else:
         checkpoint = torch.load(loadpath, map_location=torch.device('cpu'))
+
     if je:
         jemodel = jointEmbedding.JointEmbeddingModel(embed_dim=embed_size)
         jemodel.load_state_dict(checkpoint['model_state_dict'])
@@ -116,6 +124,7 @@ def getVisionClassifier(modpath, mod="", device='cuda', embed_size=512,
             vision_model = CNN_Classifier(cnn, embed_size, freeze=getFrozen, num_heads = heads.shape[0]).to(device)
         vision_model.load_state_dict(checkpoint['model_state_dict'])
         vision_model.eval()
+
     if getFrozen:
         for param in vision_model.cnn_model.parameters():
             param.requires_grad = False
@@ -125,10 +134,10 @@ def getVisionClassifier(modpath, mod="", device='cuda', embed_size=512,
 
     return vision_model
 
-
+#Outputs cosine similarities
 def getSimilarityClassifier(modpath, mod="", device='cuda', embed_size=512,
                 heads = np.array(['Cardiomegaly', 'Edema', 'Consolidation', 'Atelectasis', 'Pleural Effusion']),
-                            text_num=3, avg_embedding=True, use_covid=False):
+                            text_num=20, avg_embedding=True, use_convirt=False, soft=False):
     je_model_path = modpath + mod
     if device == 'cuda':
         checkpoint = torch.load(je_model_path)
@@ -143,7 +152,7 @@ def getSimilarityClassifier(modpath, mod="", device='cuda', embed_size=512,
         cnn = je_model.cnn
         je_vision_model = CNN_Similarity_Classifier(cnn_model=cnn, transformer_model=transformer_model,
                                                     tokenizer=tokenizer, heads = heads,
-                                                    device=device, get_num=text_num, avg_embedding=avg_embedding, use_covid=use_covid)
+                                                    device=device, get_num=text_num, avg_embedding=avg_embedding, use_convirt=use_convirt, soft=soft)
     else:
         je_vision_model = je_model.vit
 

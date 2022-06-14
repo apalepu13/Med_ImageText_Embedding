@@ -2,9 +2,10 @@ import regex as re
 from Data_Loading import *
 import torch
 import torch.nn as nn
+import numpy as np
 
 def getDatasets(source, subset = ['train', 'val', 'test'], synthetic = False,
-                get_text = True, get_good=False, get_adversary = False, get_overwrites=False,
+                get_text = True, get_good=False, get_adversary = False, get_overwrites=False, get_seg=False,
                 heads = ['Cardiomegaly', 'Edema', 'Consolidation', 'Atelectasis', 'Pleural Effusion']):
     s = source
     datlist = {}
@@ -17,7 +18,7 @@ def getDatasets(source, subset = ['train', 'val', 'test'], synthetic = False,
     else:
         for sub in subset:
             datlist[sub] = Image_Text_Dataset(source=s, group=sub, synth=synthetic,
-                                              get_good=get_good, get_adversary=get_adversary, get_text = get_text,
+                                              get_good=get_good, get_adversary=get_adversary, get_text = get_text, get_seg=get_seg,
                                               out_heads = heads)
     return datlist
 
@@ -182,16 +183,25 @@ def train_vision(device, vision_model, im1, im2, labels, heads, criterion=torch.
 def validate_vision(device, val_data_loader, vision_model, heads, criterion, source = "MIMIC", proportion = 1.0):
     vlosses = []
     with torch.no_grad():
-        for j, (valims1, valims2, val_labels, patients) in enumerate(val_data_loader):
+        for j, res in enumerate(val_data_loader):
+            if source == "MIMIC":
+                valims1, valims2, val_labels, patients = res
+            else:
+                valims1, val_labels = res
+                valims2 = None
+
             gen = np.random.rand(1)
             if gen >= proportion:
                 continue
 
             valims1 = valims1.to(device)
-            valims2 = valims2.to(device)
             valpred1= vision_model(valims1)
-            valpred2 = vision_model(valims2)
-            myloss = b_loss(valpred1, val_labels, device, heads, criterion) + b_loss(valpred2, val_labels, device, heads, criterion)
+            myloss = b_loss(valpred1, val_labels, device, heads, criterion)
+            if valims2 is not None:
+                valims2 = valims2.to(device)
+                valpred2 = vision_model(valims2)
+                myloss = myloss + b_loss(valpred2, val_labels, device, heads, criterion)
+
             vlosses.append(myloss.cpu())
 
     vlloss = np.mean(np.array(vlosses))
@@ -215,11 +225,9 @@ def getLabels(df, heads):
 
 def get_all_preds(DL, mod, heads = ['covid19', 'No Finding'], device='cuda'):
     tp, tt = None, None
-    num_ims = 1
     for i, res in enumerate(DL):
         try:
             im1, im2, df, study = res
-            num_ims = 2
         except:
             im1, df = res
 

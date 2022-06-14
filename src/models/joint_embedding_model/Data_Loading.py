@@ -11,7 +11,6 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms, utils
 import re
 
-
 def textProcess(text):
     sections = 'WET READ:|FINAL REPORT |INDICATION:|HISTORY:|STUDY:|COMPARISONS:|COMPARISON:|TECHNIQUE:|FINDINGS:|IMPRESSION:|NOTIFICATION:'
     mydict = {}
@@ -113,11 +112,11 @@ class Image_Text_Dataset(Dataset):
 
     def __init__(self, source = 'mimic_cxr', group='train',
                  synth = False,overwrite = False, get_good=False, get_adversary=False,
-                 get_text = True, grayscale=True,
+                 get_text = True, grayscale=True, get_seg=False,
                  out_heads = ['Cardiomegaly', 'Edema', 'Consolidation', 'Atelectasis', 'Pleural Effusion'],
                  mimic_csv_file='/n/data2/hms/dbmi/beamlab/mimic_cxr/mimic-cxr-2.0.0-split.csv', mimic_root_dir='/n/data2/hms/dbmi/beamlab/mimic_cxr/',
                  mimic_chex_file='/n/data2/hms/dbmi/beamlab/mimic_cxr/mimic-cxr-2.0.0-chexpert.csv',
-                 indiana_csv_file='../../../data/indiana_cxr_list.csv', indiana_root_dir='/n/data2/hms/dbmi/beamlab/indiana_cxr/',
+                 indiana_csv_file='/n/data2/hms/dbmi/beamlab/anil/Med_ImageText_Embedding/data/indiana_cxr_list.csv', indiana_root_dir='/n/data2/hms/dbmi/beamlab/indiana_cxr/',
                  chexpert_root_dir='/n/data2/hms/dbmi/beamlab/chexpert/',
                  covid_chestxray_csv_file = '/n/data2/hms/dbmi/beamlab/covid19qu/infection_dat/data_list.csv',
                  medpix_root_dir='/n/data2/hms/dbmi/beamlab/medpix/', medpix_file='medpix_case_data_table.csv',
@@ -139,6 +138,7 @@ class Image_Text_Dataset(Dataset):
         self.overwrite = overwrite
 
         self.get_text = get_text
+        self.get_seg = get_seg
         self.text_process = text_process
         self.source = source
         self.grayscale = grayscale
@@ -168,6 +168,10 @@ class Image_Text_Dataset(Dataset):
         self.im_finish = transforms.Compose([
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
+
+        self.totensor = transforms.Compose([
+            transforms.ToTensor()
+        ])
 
 
         self.im_preprocessing_test = transforms.Compose([
@@ -222,9 +226,12 @@ class Image_Text_Dataset(Dataset):
                 self.im_list = im_list_train
                 print(self.im_list.index)
                 self.im_list = self.im_list[self.im_list.index % 100 != 0]
-            elif group == 'val':
+            elif group == 'valtrain':
                 self.im_list = im_list_train
                 self.im_list = self.im_list[self.im_list.index % 100 == 0]
+            elif group == 'valval':
+                self.im_list = im_list_train
+                self.im_list = self.im_list[self.im_list.index % 500 == 1]
             elif group == 'test':
                 self.im_list = im_list_val
             elif group=='candidates' or group == 'synth_candidates':
@@ -269,6 +276,8 @@ class Image_Text_Dataset(Dataset):
             self.im_list = self.im_list[self.im_list['label'].isin(self.heads)]
             if group == 'train' or group == 'val' or group =='test':
                 self.im_list = self.im_list[self.im_list['group'].str.contains(group)]
+            if group == 'tiny':
+                self.im_list = self.im_list[::50]
 
 
 
@@ -276,6 +285,10 @@ class Image_Text_Dataset(Dataset):
             self.root_dir = medpix_root_dir
             self.im_list = pd.read_csv(self.root_dir + medpix_file)
             #TO BE COMPLETED
+
+        elif self.source =='scr':
+            self.root_dir = scr_root_dir
+            self.im_list = pd.read_csv(self.root_dir + scr_file)
 
 
         print(self.source, group + " size= " + str(self.im_list.shape))
@@ -381,31 +394,16 @@ class Image_Text_Dataset(Dataset):
             image = image.convert("RGB")
             image = self.im_preprocessing_test(image)
             image = self.im_finish(image)
-            df = df.loc[['No Finding', 'Pneumonia', 'covid19']]
-            return (image, df.to_dict())
-
-
-
-
-
-def print_text_percentiles():
-    itd = Image_Text_Dataset()
-    wordlens = []
-    for i in np.arange(1, 20000, 100):
-        im, text = itd.__getitem__(i)
-        sp = text.split()
-        wordlens.append(len(sp))
-        if len(sp) > 300:
-            print(text)
-        elif len(sp) < 40:
-            print(text)
-    wordlens = np.array(wordlens)
-
-    print(np.max(wordlens))
-    print(np.percentile(wordlens, 75))
-    print(np.percentile(wordlens, 50))
-    print(np.percentile(wordlens, 25))
-    print(np.min(wordlens))
+            if self.get_seg:
+                lung_mask = Image.open(df['lung_path'])
+                inf_mask = Image.open(df['inf_path'])
+                lung_mask = self.totensor(lung_mask)
+                inf_mask = self.totensor(inf_mask)
+                df = df.loc[['No Finding', 'Pneumonia', 'covid19']]
+                return (image, inf_mask, lung_mask, df.to_dict())
+            else:
+                df = df.loc[['No Finding', 'Pneumonia', 'covid19']]
+                return (image, df.to_dict())
 
 train_dat = Image_Text_Dataset(source = 'chexpert', group = 'all', synth=False)
 for i in np.arange(3333,3337):
