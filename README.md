@@ -6,4 +6,4 @@ Beam Lab
 
 9/29/2021
 
-Code for jointly embedding corresponding medical image &amp; text data to prevent shortcut learning
+Code for jointly embedding corresponding medical image &amp; text data
