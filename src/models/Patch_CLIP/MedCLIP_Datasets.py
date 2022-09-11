@@ -2,20 +2,17 @@ import torch
 import numpy as np
 import os
 from PIL import Image
-from Data_Helpers import *
+import MedDataHelpers
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms, utils
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-class Image_Text_Dataset(Dataset):
+class MedDataset(Dataset):
     """Chx - Report dataset.""" #d
     def __init__(self, source = 'mimic_cxr', group='train', im_aug = 1,
                  synth = False, get_good = False, get_adversary = False, overwrite = False,
                  out_heads = ['Cardiomegaly', 'Edema', 'Consolidation', 'Atelectasis', 'Pleural Effusion'],
                  filters = []):
-        """
-
-        """
         # filepaths
         fps = {}
         fps['mimic_root_dir'] = '/n/data2/hms/dbmi/beamlab/mimic_cxr/'
@@ -43,7 +40,7 @@ class Image_Text_Dataset(Dataset):
             transforms.RandomResizedCrop(224, ratio=(.9, 1.0)),
             transforms.RandomAffine(10, translate=(.05, .05), scale=(.95, 1.05)),
             transforms.ColorJitter(brightness=.2, contrast=.2),
-            #transforms.GaussianBlur(kernel_size=15, sigma=(.1, 3.0)),
+            #transforms.GaussianBlur(kernel_size=15, sigma=(.1, 3.0))
             transforms.Resize(size=(224, 224))])
 
         self.im_preprocessing_test = transforms.Compose([
@@ -58,7 +55,7 @@ class Image_Text_Dataset(Dataset):
             transforms.ToTensor()
         ])
 
-        self.im_list, self.root_dir = getImList(sr = self.source, group = self.group, fps = fps,
+        self.im_list, self.root_dir = MedDataHelpers.getImList(sr = self.source, group = self.group, fps = fps,
                                                 heads = self.heads, filters = filters)
         print(self.source, group + " size= " + str(self.im_list.shape))
 
@@ -82,18 +79,12 @@ class Image_Text_Dataset(Dataset):
             if self.synth:
                 incorrect = [s for s in self.heads if df[s] != 1.0]
                 correct = [s for s in self.heads if df[s] == 1.0]
-                images = [make_synthetic(im, incorrect, correct, overwrite=self.overwrite, get_adversary=self.get_adversary,get_good=self.get_good) for im in images]
+                images = [MedDataHelpers.make_synthetic(im, incorrect, correct, overwrite=self.overwrite, get_adversary=self.get_adversary,get_good=self.get_good) for im in images]
 
             images = [self.im_finish(im) for im in images]
-
-            text_name = os.path.join(self.root_dir, ims['pGroup'], ims['pName'], ims['sName'], ims['sName'] + '.txt')
-            with open(text_name, "r") as text_file:
-                text = text_file.read()
-            text = text.replace('\n', '')
-            text = textProcess(text)
             sample['images'] = images
             sample['labels'] = df.to_dict()
-            sample['texts'] = text #ims, df, text
+            sample['texts'] = ims.loc['text'] #ims, df, text
             return sample
 
         elif self.source == 'indiana_cxr':
@@ -122,7 +113,7 @@ class Image_Text_Dataset(Dataset):
             if self.synth:
                 incorrect = [s for s in self.heads if df[s] != 1.0]
                 correct = [s for s in self.heads if df[s] == 1.0]
-                image = make_synthetic(image, incorrect, correct, overwrite = self.overwrite, get_adversary=self.get_adversary, get_good=self.get_good)
+                image = MedDataHelpers.make_synthetic(image, incorrect, correct, overwrite = self.overwrite, get_adversary=self.get_adversary, get_good=self.get_good)
             image = self.im_finish(image)
             df = df.loc[self.heads]
             sample['images'] = [image]
@@ -148,8 +139,8 @@ class Image_Text_Dataset(Dataset):
             return sample
 
 if __name__=='__main__':
-    train_dat = Image_Text_Dataset(source = 'mimic_cxr', group = 'train', synth=False, im_aug=3)
-    for i in np.arange(3333,3336):
+    train_dat = MedDataset(source = 'mimic_cxr', group = 'tinyval', synth=False, im_aug=3, filters=['frontal', 'findings'])
+    for i in np.arange(33,36):
         result = train_dat.__getitem__(i)
         print(result['labels'])
 

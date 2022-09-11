@@ -58,8 +58,8 @@ def precAt(query_labels, candidate_labels, k=1):
 
 def main(args):
     subset = ['queries', 'candidates']
-
-    chexpert_dat = getDatasets(source='c', subset=subset, synthetic=args.synthetic)
+    filters = getFilters(args.model_path)
+    chexpert_dat = getDatasets(source='c', subset=subset, synthetic=args.synthetic, filters = filters)
     query_data_loader_chexpert, candidate_data_loader_chexpert = getLoaders(chexpert_dat, args, subset=subset)
 
     model_root_dir = args.model_path
@@ -71,7 +71,7 @@ def main(args):
     else:
         checkpoint = torch.load(loadpath, map_location=torch.device('cpu'))
 
-    je_model = JointEmbeddingModel(args.embed_size).to(device)
+    je_model = JointEmbeddingModel(args.embed_size, pool_first = "local" not in args.model_path).to(device)
     je_model.load_state_dict(checkpoint['model_state_dict'], strict = False)
     if not hasattr(checkpoint['args'], 'vit') or not checkpoint['args'].vit:
         cnn_model = je_model.cnn
@@ -89,17 +89,10 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model_path', type=str, default='/n/data2/hms/dbmi/beamlab/anil/Med_ImageText_Embedding/models/je_model/', help='path for saving trained models')
-    parser.add_argument('--model', type=str, default='exp6/je_model-28.pt', help='path from root to model')
-    #synth/exp1/je_model-76.pt
-    #exp5/je_model-94.pt #7.3399
-    #exp2/finetuned/chexpert_unfrozen.pt
-    #exp4/je_model-90.pt
-    #exp3/je_model-76.pt
-    #exp2/je_model-81.pt
-    #super_baseline, baseline, frozen, unfrozen
+    parser.add_argument('--model_path', type=str, default='/n/data2/hms/dbmi/beamlab/anil/Med_ImageText_Embedding/models/local_je_model/exp1/', help='path for saving trained models')
+    parser.add_argument('--model', type=str, default='best_model.pt', help='path from root to model')
     parser.add_argument('--synthetic', type=bool, default=False)
-    parser.add_argument('--embed_size', type=int, default=512, help='dimension of word embedding vectors')
+    parser.add_argument('--embed_size', type=int, default=128, help='dimension of word embedding vectors')
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--results_dir', type=str, default='/n/data2/hms/dbmi/beamlab/anil/Med_ImageText_Embedding/results/zeroshot/')
     args = parser.parse_args()

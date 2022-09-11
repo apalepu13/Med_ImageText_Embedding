@@ -3,6 +3,7 @@ from torch import nn
 from transformers import AutoTokenizer, AutoModel
 import pandas as pd
 import numpy as np
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 def getTextEmbeddings(heads, transformer, tokenizer, use_convirt = False, device = 'cuda', get_num=1):
     if use_convirt:
@@ -45,54 +46,85 @@ def getTextEmbeddings(heads, transformer, tokenizer, use_convirt = False, device
     outlabs = torch.tensor(lab.map(head_dict).values)
     return torch.tensor(e), outlabs
 
-class Bio_tokenizer():
-    def __init__(self, use_cxr_bert = True):
-        self.use_cxr_bert = use_cxr_bert
-        if not self.use_cxr_bert:
-            self.tokenizer = AutoTokenizer.from_pretrained("emilyalsentzer/Bio_ClinicalBERT")
-        else:
-            url = "microsoft/BiomedVLP-CXR-BERT-specialized"
-            self.tokenizer = AutoTokenizer.from_pretrained(url, trust_remote_code=True)
-    def do_encode(self, texts):
+
+class CNN_Similarity_Classifier(nn.Module):
+    def __init__(self, cnn_model, transformer_model, tokenizer,
+                 heads=np.array(['Cardiomegaly', 'Edema', 'Consolidation', 'Atelectasis', 'Pleural Effusion'])
+                 , use_convirt=False, get_num=20, avg_embedding=True, soft=False):
+
+        super().__init__()
+        self.cnn_model = cnn_model
+        self.transformer_model = transformer_model
+        self.tokenizer = tokenizer
+        self.heads = heads
+        self.device = device
+        self.tembed, self.tlab = getTextEmbeddings(heads=self.heads, transformer=self.transformer_model,
+                                                               tokenizer=self.tokenizer,
+                                                               use_convirt=use_convirt, device=device,
+                                                               get_num=get_num)
+        self.get_num = get_num
+        self.avg_embedding = avg_embedding
+        self.softmax = nn.Softmax(dim=1)
+        self.soft = soft
+
+    def forward(self, image):
+        with torch.no_grad():
+            embedding = self.cnn_model(image)
+            embedding = embedding / embedding.norm(dim=-1, keepdim=True)
+            class_score = torch.zeros(embedding.shape[0], self.heads.shape[0]).to(self.device)
+            for i, h in enumerate(self.heads):
+                t = self.tembed[self.tlab == i, :]
+                tembed = t / t.norm(dim=-1, keepdim=True)
+                if self.get_num > 1:
+                    tembed = tembed.mean(dim=0)
+                tembed = tembed / tembed.norm(dim=-1, keepdim=True)
+                head_sim = embedding @ tembed.t()
+                head_sim = head_sim.squeeze()
+                class_score[:, i] = head_sim
+
+            return (self.softmax(class_score) if self.soft else class_score)
+
+
+class Report_Tokenizer():
+    def __init__(self):
+        url = "microsoft/BiomedVLP-CXR-BERT-specialized"
+        self.tokenizer = AutoTokenizer.from_pretrained(url, trust_remote_code=True)
+    def encode(self, texts):
         texts = [t for t in texts]
-        if not self.use_cxr_bert:
-            encodings = self.tokenizer(texts, padding=True, truncation=True, max_length = 256, return_tensors="pt")
-        else:
-            encodings = self.tokenizer.batch_encode_plus(batch_text_or_text_pairs=texts,
-                                        add_special_tokens=True,
-                                        padding=True, truncation=True, max_length=256,
-                                        return_tensors='pt')
+        encodings = self.tokenizer.batch_encode_plus(batch_text_or_text_pairs=texts,
+                                    add_special_tokens=True,
+                                    padding=True, truncation=True, max_length=256,
+                                    return_tensors='pt')
         return encodings
 
 class Transformer_Embeddings(nn.Module):
-    def __init__(self, embed_dim = 512, use_cxr_bert = True):
+    def __init__(self, embed_dim = 128, cls_only = False, args=None):
         super().__init__()
-        self.use_cxr_bert = use_cxr_bert
-
-        if not self.use_cxr_bert:
-            self.embed_dim = embed_dim
-            self.model = AutoModel.from_pretrained("emilyalsentzer/Bio_ClinicalBERT")
-            modules = [self.model.embeddings, *self.model.encoder.layer[:8]]  # freeze bottom 8 layers only
-            self.linear1 = nn.Linear(768, self.embed_dim)  # fc layer to embed dim
-        else:
-            url = "microsoft/BiomedVLP-CXR-BERT-specialized"
-            self.model = AutoModel.from_pretrained(url, trust_remote_code=True)
-            modules = [self.model.bert.embeddings, *self.model.bert.encoder.layer[:], self.model.cls, self.model.cls_projection_head ]
-
+        self.embed_dim = embed_dim
+        url = "microsoft/BiomedVLP-CXR-BERT-specialized"
+        self.txt_layernorm = nn.LayerNorm(768)
+        self.linear1 = nn.Linear(768, 128)
+        self.model = AutoModel.from_pretrained(url, trust_remote_code=True)
+        self.cls_only = cls_only
+        modules = [self.model.bert.embeddings, *self.model.bert.encoder.layer[:8]]
         for module in modules:
             for param in module.parameters():
                 param.requires_grad = False
 
     def forward(self, text):
-        if self.use_cxr_bert:
-            embeddings = self.model.get_projected_text_embeddings(input_ids=text.input_ids,attention_mask=text.attention_mask)
+        if not self.cls_only:
+            outputs = self.model(input_ids=text.input_ids,attention_mask=text.attention_mask,output_cls_projected_embedding=True, return_dict=True)
+            token_embeddings = outputs.last_hidden_state
+            token_embeddings = self.txt_layernorm(token_embeddings)
+            token_embeddings = self.linear1(token_embeddings)
+            return token_embeddings
         else:
-            embeddings = self.model(input_ids = text['input_ids'], attention_mask = text['attention_mask'])
-            embeddings = self.linear1(embeddings.pooler_output)
-        return embeddings
+            embeddings = self.model.get_projected_text_embeddings(input_ids=text.input_ids,attention_mask=text.attention_mask)
+            return embeddings
+
 
 if __name__ == '__main__':
-    bt = Bio_tokenizer()
+    bt = Report_Tokenizer()
     te = Transformer_Embeddings(512)
     toks = bt.do_encode(["Hi my name is Anil. I am a nice guy."])
     embeds = te(toks)

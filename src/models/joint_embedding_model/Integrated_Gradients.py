@@ -71,9 +71,8 @@ def plot_ig_saliency(img, targind, model, myfig, myax, x, y, use_abs = True, act
         gs = myVisualizeImageGrayscale(sig)
     if actually_plot:
         myax[x,y].imshow(gs, plt.cm.plasma, vmin=0, vmax=1)
-        source = ['NA', 'Real ', 'Synth ']
-        if x == 0:
-            myax[x, y].set_title(source[y] + modname)
+        source = ['Real ', 'Shortcut ']
+        myax[x, y].set_title(source[x] + modname)
         myax[x,y].set_xticks([])
         myax[x,y].set_xticks([], minor=True)
         myax[x,y].set_yticks([])
@@ -82,7 +81,7 @@ def plot_ig_saliency(img, targind, model, myfig, myax, x, y, use_abs = True, act
 
 def getAttributions(im_dict, real_model,synth_model, heads, target='Cardiomegaly', mod_name='vision', im_number=0, df=None, use_abs = True, actually_plot = True):
     if actually_plot:
-        myfig, myax = plt.subplots(2, 3, figsize=(12, 7))
+        myfig, myax = plt.subplots(3, 2, figsize=(7, 12))
     else:
         myfig, myax = 0, 0
 
@@ -94,28 +93,28 @@ def getAttributions(im_dict, real_model,synth_model, heads, target='Cardiomegaly
             labstr += h
             labstr += ", "
 
-    gsrr = plot_ig_saliency(im_dict['real'].clone().permute(0,2,3,1).numpy().squeeze(), myind,real_model, myfig, myax, 0, 1, use_abs, actually_plot, modname=mod_name)
-    gssr = plot_ig_saliency(im_dict[target].clone().permute(0,2,3,1).numpy().squeeze(), myind,real_model, myfig, myax, 1, 1, use_abs, actually_plot, modname=mod_name)
-    gsrs = plot_ig_saliency(im_dict['real'].clone().permute(0,2,3,1).numpy().squeeze(), myind,synth_model, myfig, myax, 0, 2, use_abs, actually_plot, modname=mod_name)
-    gsss = plot_ig_saliency(im_dict[target].clone().permute(0,2,3,1).numpy().squeeze(), myind,synth_model, myfig, myax, 1, 2,use_abs, actually_plot, modname=mod_name)
+    gsrr = plot_ig_saliency(im_dict['real'].clone().permute(0,2,3,1).numpy().squeeze(), myind,real_model, myfig, myax, 0, 0, use_abs, actually_plot, modname=mod_name)
+    gssr = plot_ig_saliency(im_dict[target].clone().permute(0,2,3,1).numpy().squeeze(), myind,real_model, myfig, myax, 0, 1, use_abs, actually_plot, modname=mod_name)
+    gsrs = plot_ig_saliency(im_dict['real'].clone().permute(0,2,3,1).numpy().squeeze(), myind,synth_model, myfig, myax, 1, 0, use_abs, actually_plot, modname=mod_name)
+    gsss = plot_ig_saliency(im_dict[target].clone().permute(0,2,3,1).numpy().squeeze(), myind,synth_model, myfig, myax, 1, 1,use_abs, actually_plot, modname=mod_name)
 
     dist_real_im = getIGdistance(gsrr, gsrs)[1]
     dist_synth_im = getIGdistance(gssr, gsss)[1]
     dist_real_mod = getIGdistance(gsrr, gssr)[1]
     dist_synth_mod = getIGdistance(gsrs, gsss)[1] #cosinesim
+
+    ig_score = str(np.round(dist_synth_im + dist_synth_mod, 3))
+    print(im_number, ig_score)
+    if (float(ig_score) > 0.6 and mod_name == 'vision') or (float(ig_score) < 1.4 and mod_name == 'clip'):
+        return dist_real_im, dist_synth_im, dist_real_mod, dist_synth_mod
     if actually_plot:
-        print(mod_name)
-        print("real image, real vs synth", dist_real_im)
-        print("synth image, real vs synth", dist_synth_im)
-        print("real model, real im vs synth im", dist_real_mod)
-        print("synth model, real im vs synth im", dist_synth_mod)
-        plot_orig_im(im_dict['real'].clone(), myfig, myax, 0, 0, title="Test Image")
-        plot_orig_im(im_dict[target].clone(), myfig, myax, 1, 0, title="Synthetic Test Image")
+        plot_orig_im(im_dict['real'].clone(), myfig, myax, 2, 0, title="Test Image")
+        plot_orig_im(im_dict[target].clone(), myfig, myax, 2, 1, title="Synthetic Test Image")
         if labstr == "Labels: ":
             labstr = "Labels: No Finding"
-        myfig.suptitle("Integrated Gradient, " + mod_name + " model.")
-        plt.savefig(args.results_dir + "Integrated_grad_abs_"+str(use_abs)+"_" + target + "_" + mod_name + "_" + str(im_number) + ".png", bbox_inches='tight')
-        return
+        myfig.suptitle("Integrated Gradient, " + mod_name + " model." + "\n" + labstr)
+        plt.savefig(args.results_dir + str(im_number) + "_" + target + "_" + mod_name + "_"  + ig_score +  ".png", bbox_inches='tight')
+        return dist_real_im, dist_synth_im, dist_real_mod, dist_synth_mod
     else:
         return dist_real_im, dist_synth_im, dist_real_mod, dist_synth_mod
 
@@ -154,11 +153,13 @@ def main(args):
                                             text_num=1, avg_embedding=True)
 
     if args.get_finetuned:
-        finetuned_vision_model_synth = getVisionClassifier(args.model_path_synth, args.model_synth, device, args.embed_size, heads, add_finetune=True)
-        finetuned_je_model_synth = getVisionClassifier(args.je_model_path_synth, args.je_model_synth, device,args.embed_size, heads, add_finetune=True)
+        finetuned_vision_model_real = getVisionClassifier(args.model_path_real, 'best_model.pt', device, args.embed_size, heads, add_finetune=True)
+        finetuned_je_model_real = getVisionClassifier(args.je_model_path_real, 'best_model.pt', device,args.embed_size, heads, add_finetune=True)
+        finetuned_vision_model_synth = getVisionClassifier(args.model_path_synth, 'best_model.pt', device, args.embed_size, heads, add_finetune=True)
+        finetuned_je_model_synth = getVisionClassifier(args.je_model_path_synth, 'best_model.pt', device,args.embed_size, heads, add_finetune=True)
 
     if args.getOne:
-        im_number = 99
+        im_number = 109
         im_dict = {}
         normIm, normDf = dat_normal.__getitem__(im_number)
         normIm = normIm.reshape(1, 3, 224, 224)
@@ -171,7 +172,8 @@ def main(args):
             getAttributions(im_dict, vision_model_real, vision_model_synth, heads, target=target, mod_name="CNN", im_number=im_number, df = normDf, use_abs=False)
             getAttributions(im_dict, je_model_real, je_model_synth, heads, target=target, mod_name="CLIP", im_number=im_number, df = normDf, use_abs=False)
             if args.get_finetuned:
-                getAttributions(im_dict, finetuned_vision_model_synth, finetuned_je_model_synth, heads, target=target, mod_name="finetuned", im_number=im_number, df=normDf, use_abs=False)
+                getAttributions(im_dict, finetuned_vision_model_real, finetuned_vision_model_synth, heads, target=target,mod_name="finetuned CNN", im_number=im_number, df=normDf, use_abs=False)
+                getAttributions(im_dict, finetuned_je_model_real, finetuned_je_model_synth, heads, target=target, mod_name="finetuned CLIP", im_number=im_number, df=normDf, use_abs=False)
     else:
         simDict = {'Vrim':[], 'Vsim':[], 'Vrmo':[], 'Vsmo':[],
                    'Crim':[], 'Csim':[], 'Crmo':[], 'Csmo':[],
@@ -187,8 +189,8 @@ def main(args):
                 im_dict[h] = myim
 
             for target in heads:
-                Vrim,Vsim,Vrmo,Vsmo = getAttributions(im_dict, vision_model_real, vision_model_synth, heads, target=target, mod_name="vision", im_number=im_number, df=normDf, use_abs=False, actually_plot=False)
-                Crim, Csim, Crmo, Csmo = getAttributions(im_dict, je_model_real, je_model_synth, heads, target=target, mod_name="clip",im_number=im_number, df=normDf, use_abs=False, actually_plot=False)
+                Vrim,Vsim,Vrmo,Vsmo = getAttributions(im_dict, vision_model_real, vision_model_synth, heads, target=target, mod_name="vision", im_number=im_number, df=normDf, use_abs=False, actually_plot=True)
+                Crim, Csim, Crmo, Csmo = getAttributions(im_dict, je_model_real, je_model_synth, heads, target=target, mod_name="clip",im_number=im_number, df=normDf, use_abs=False, actually_plot=True)
 
             simDict['Vrim'].append(Vrim)
             simDict['Vsim'].append(Vsim)
@@ -208,15 +210,10 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--je_model_path_real', type=str,default='/n/data2/hms/dbmi/beamlab/anil/Med_ImageText_Embedding/models/je_model/exp6/')
+    parser.add_argument('--je_model_path_real', type=str,default='/n/data2/hms/dbmi/beamlab/anil/Med_ImageText_Embedding/models/je_model/exp2/')
     parser.add_argument('--model_path_real', type=str, default='/n/data2/hms/dbmi/beamlab/anil/Med_ImageText_Embedding/models/vision_model/vision_CNN_real/')
-    parser.add_argument('--je_model_path_synth', type=str, default='/n/data2/hms/dbmi/beamlab/anil/Med_ImageText_Embedding/models/je_model/synth/exp7/')
+    parser.add_argument('--je_model_path_synth', type=str, default='/n/data2/hms/dbmi/beamlab/anil/Med_ImageText_Embedding/models/je_model/synth/exp2/')
     parser.add_argument('--model_path_synth', type=str, default='/n/data2/hms/dbmi/beamlab/anil/Med_ImageText_Embedding/models/vision_model/vision_CNN_synthetic/', help='path for saving trained models')
-
-    parser.add_argument('--je_model_real', type=str, default='je_model-28.pt')
-    parser.add_argument('--model_real', type=str, default='model-14.pt')
-    parser.add_argument('--je_model_synth', type=str, default='je_model-12.pt')
-    parser.add_argument('--model_synth', type=str, default='model-14.pt', help='path from root to model')
 
     parser.add_argument('--results_dir', type=str, default='/n/data2/hms/dbmi/beamlab/anil/Med_ImageText_Embedding/results/integrated_gradients/')
     parser.add_argument('--sr', type=str, default='c') #c, co
@@ -224,8 +221,8 @@ if __name__ == '__main__':
     parser.add_argument('--synth', type=bool, default=False, const=True, nargs='?', help='Train on synthetic dataset')
     parser.add_argument('--usemimic', type=bool, default=False, const=True, nargs='?', help='Use mimic to alter zeroshot')
     parser.add_argument('--getOne', type=bool, default=True, const=False, nargs='?')
-    parser.add_argument('--get_finetuned', type=bool, default=False, const=True, nargs='?')
-    parser.add_argument('--embed_size', type=int, default=512, help='dimension of word embedding vectors')
+    parser.add_argument('--get_finetuned', type=bool, default=True, const=False, nargs='?')
+    parser.add_argument('--embed_size', type=int, default=128, help='dimension of word embedding vectors')
     parser.add_argument('--batch_size', type=int, default=1) #32 normally
     args = parser.parse_args()
     print(args)

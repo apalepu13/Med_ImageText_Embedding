@@ -1,22 +1,21 @@
 import sys
-sys.path.insert(0, '../../models/joint_embedding_model/')
+sys.path.insert(0, '../../models/Patch_CLIP/')
 import pandas as pd
 import numpy as np
-from Data_Loading import *
+import MedDataHelpers
 import torch
 print("CUDA Available: " + str(torch.cuda.is_available()))
-from Transformer import *
-from Pretraining import *
 
 # Device configuration
-multilabel=True
+multilabel=False
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 heads = np.array(['Cardiomegaly', 'Edema', 'Consolidation', 'Atelectasis', 'Pleural Effusion', 'Pneumonia',
                   'No Finding', 'Enlarged Cardiomediastinum', 'Fracture', 'Lung Lesion', 'Lung Opacity', 'Pleural Other',
                   'Pneumonia','Pneumothorax', 'Support Devices'])
-mimic_dat = getDatasets(source='m', subset = ['test'], get_text=False, heads=heads)
-[mimic_loader] = getLoaders(mimic_dat, subset=['test'])
+mimic_dat = MedDataHelpers.getDatasets(source='m', subset = ['val'], heads=heads, filters=['frontal'])
+mimic_loader = MedDataHelpers.getLoaders(mimic_dat)
+mimic_loader = mimic_loader['val']
 
 outDF = []
 print("Hi")
@@ -34,21 +33,22 @@ if multilabel:
     print(df.shape)
     print(df.head())
 else:
-    for i, (im1, im2, df, text) in enumerate(mimic_loader):
+    for i, samples in enumerate(mimic_loader):
+        text = samples['texts']
+        df = samples['labels']
         dfvals = np.array([df[h].numpy() for h in heads]).T
         dfvals = (dfvals == 1).astype(int)
         dfsums = np.sum(dfvals, axis=1)
         for r in np.arange(dfvals.shape[0]):
-            if dfsums[r] < 1:
+            if dfsums[r] != 1:
                 continue
             head_ind = np.argwhere(dfvals[r, :])[0]
             for myh in head_ind:
                 myhead = heads[myh]
-                for k in np.arange(np.ceil(len(heads) / dfsums[r])):
-                    outDF.append([myhead, text[r]])
+                outDF.append([myhead, text[r]])
 
     df = pd.DataFrame(outDF, columns=['Variable', 'Text'])
-    df.to_csv('/n/data2/hms/dbmi/beamlab/anil/Med_ImageText_Embedding/data/mimic_label_queries.csv')
+    df.to_csv('/n/data2/hms/dbmi/beamlab/anil/Med_ImageText_Embedding/data/mimic_label_queries_tinytrain.csv')
     print(df.shape)
     print(np.unique(df['Variable'].values, return_counts=True))
 

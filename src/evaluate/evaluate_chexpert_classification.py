@@ -4,7 +4,7 @@ import pickle
 sys.path.insert(0, '/n/data2/hms/dbmi/beamlab/anil/Med_ImageText_Embedding/src/models/joint_embedding_model/')
 import torch
 from CNN import *
-from Pretraining import *
+from HelperFunctions import *
 from Transformer import *
 from torchmetrics import AUROC
 import numpy as np
@@ -29,12 +29,13 @@ def main(args):
                  'Shortcut CNN', 'Zeroshot Shortcut CLIP', 'Finetuned Shortcut CNN', 'Finetuned Shortcut CLIP']
     # just 4
     mod_order2 = ['Finetuned Real CNN', 'Finetuned Real CLIP', 'Finetuned Shortcut CNN', 'Finetuned Shortcut CLIP']
-    mod_order3 = ['Real CNN', 'Real CLIP', 'Shortcut CNN','Shortcut CLIP']
+    mod_order3 = ['Real CNN', 'Real CLIP', 'Shortcut CNN', 'Shortcut CLIP']
 
-    vision_models = ['vision_CNN_real/model-14.pt', 'vision_CNN_synthetic/model-14.pt',
+    vision_models = ['vision_CNN_real/model-24.pt', 'vision_CNN_synthetic/model-24.pt',
                      'vision_CNN_real/finetuned_model-14.pt', 'vision_CNN_synthetic/finetuned_model-14.pt']
-    je_models_zero = ['exp6/je_model-28.pt', 'synth/exp7/je_model-12.pt']
-    je_models_fine = ['exp6/finetuned_je_model-28.pt', 'synth/exp7/finetuned_je_model-12.pt']
+    je_models_zero = ['exp2/je_model-24.pt', 'synth/exp2/je_model-24.pt']
+    je_models_fine = ['exp2/finetuned_je_model-28.pt', 'synth/exp2/finetuned_je_model-12.pt'] #named wrong, all actualy model 24
+
     all_models = vision_models + je_models_zero + je_models_fine
     name_mods = {'Real CNN': vision_models[0], 'Shortcut CNN': vision_models[1], 'Finetuned Real CNN': vision_models[2],
                  'Finetuned Shortcut CNN': vision_models[3],
@@ -51,33 +52,44 @@ def main(args):
         elif args.subset == 't' or args.subset == 'test':
             subset = ['test']
 
-        dat = getDatasets(source=args.sr, subset=subset, synthetic=False) #Real
-        [DL] = getLoaders(dat, args, subset=subset)
-
-        dat_synth = getDatasets(source=args.sr, subset=subset, synthetic=True, get_good=True, get_overwrites=True) #Synths
-        DL2 = getLoaders(dat_synth, args, subset=heads)
-
-        dat_adv = getDatasets(source=args.sr, subset=subset, synthetic=True, get_adversary=True, get_overwrites=True) #Advs
-        DL3 = getLoaders(dat_adv, args, subset=heads)
-
         models = {}
-        for vclass in vision_models:
-            models[vclass] = getVisionClassifier(args.vision_model_path, vclass, heads=heads)
-            models[vclass].eval()
-        for venc in je_models_zero:
-            models[venc], transformer, tokenizer = getSimilarityClassifier(args.je_model_path, venc, heads=heads, avg_embedding=True, text_num=30, use_convirt=True, soft=False)
-            models[venc].eval()
-        for vclass in je_models_fine:
-            models[vclass] = getVisionClassifier(args.je_model_path, vclass, heads=heads)
-            models[vclass].eval()
+        all_filters = []
+        for mname in mod_order2:
+
+            myv = name_mods[mname]
+            if "Zeroshot" in mname:
+                all_filters.append(getFilters(args.je_model_path + myv))
+                models[myv], transformer, tokenizer = getSimilarityClassifier(args.je_model_path, myv, heads=heads,
+                                                                               avg_embedding=True, text_num=30,
+                                                                               use_convirt=True, soft=False)
+            elif "CLIP" in mname:
+                models[myv] = getVisionClassifier(args.je_model_path, myv, heads=heads)
+            else:
+                all_filters.append(getFilters(args.vision_model_path + myv))
+                models[myv] = getVisionClassifier(args.vision_model_path, myv, heads=heads)
+            models[myv].eval()
+
+        if np.unique(set(np.array(all_filters))).shape[0] != 0:
+            raise Exception("Different filters used for different models, not comparable")
+        else:
+            filters = all_filters[0]
+            dat = getDatasets(source=args.sr, subset=subset, synthetic=False, filters = filters)  # Real
+            [DL] = getLoaders(dat, args, subset=subset)
+
+            dat_synth = getDatasets(source=args.sr, subset=subset, synthetic=True, get_good=True,
+                                    get_overwrites=True, filters = filters)  # Synths
+            DL2 = getLoaders(dat_synth, args, subset=heads)
+
+            dat_adv = getDatasets(source=args.sr, subset=subset, synthetic=True, get_adversary=True,
+                                  get_overwrites=True, filters = filters)  # Advs
+            DL3 = getLoaders(dat_adv, args, subset=heads)
+
 
         all_aucs, all_synths, all_advs = {}, {}, {}
-        for m in all_models:
+        for mname in mod_order2:
+            m = name_mods[mname]
             print(m)
             outm = m.replace('/', '_')
-            isvis = "vision" in outm
-            issynth = "synth" in outm
-            isfine = "finetuned" in outm
 
             vision_model = models[m]
             aucs, aucs_synth, aucs_adv, tprs, fprs, thresholds = {}, {}, {}, {}, {}, {}
@@ -181,6 +193,7 @@ def main(args):
     width = 0.1
     centeroffset = np.array([4, 2, 0, -2, -4])/2
 
+    '''
     for z, m in enumerate(mod_order2):
         axs[0].bar(x[z], all_aucs[name_mods[m]]['Total'],width * 7, color = 'k')
         axs[0].text(x[z], 1.01, str(np.round(all_aucs[name_mods[m]]['Total'], 3)), color='k', fontweight='bold', ha='center')
@@ -188,7 +201,18 @@ def main(args):
         axs[1].text(x[z], 1.01, str(np.round(all_synths[name_mods[m]]['Total'], 3)), color='k', fontweight='bold', ha='center')
         axs[2].bar(x[z], all_advs[name_mods[m]]['Total'],width * 7, color='k')
         axs[2].text(x[z], 1.01, str(np.round(all_advs[name_mods[m]]['Total'], 3)), color='k', fontweight='bold', ha='center')
+    '''
 
+    for z, m in enumerate(mod_order2):
+        axs[0].bar(x[z] + width * -3, all_aucs[name_mods[m]]['Total'], width, color='k')
+        axs[0].text(x[z] + width * -3, 1.01, str(np.round(all_aucs[name_mods[m]]['Total'], 3)), color='k', fontweight='bold',
+                    ha='left')
+        axs[1].bar(x[z] + width * -3, all_synths[name_mods[m]]['Total'], width, color='k')
+        axs[1].text(x[z] + width * -3, 1.01, str(np.round(all_synths[name_mods[m]]['Total'], 3)), color='k', fontweight='bold',
+                    ha='left')
+        axs[2].bar(x[z] + width * -3, all_advs[name_mods[m]]['Total'], width, color='k')
+        axs[2].text(x[z] + width * -3, 1.01, str(np.round(all_advs[name_mods[m]]['Total'], 3)), color='k', fontweight='bold',
+                    ha='left')
     for k, h in enumerate(heads_order):
         for z, m in enumerate(mod_order2):
             axs[0].bar(x[z] + width * centeroffset[k], all_aucs[name_mods[m]][h], width, color = colors[h], alpha = 0.9)
@@ -210,10 +234,14 @@ def main(args):
     labels1 = [c for c in colors.keys()]
     axs[0].legend(handles1, labels1, loc=3, framealpha=1, title="Clinical Label", ncol=2)
     for k, ax in enumerate(axs):
-        ax.axvline(x=1.5, color='k', label='axvline - full height')
-        #ax.axhline(y=1.0, color='k')
-        #ax.axvline(x=3.5, color='k', label='axvline - full height')
-        #ax.axvline(x=5.5, color='k', label='axvline - full height')
+        if len(mod_order2) > 2:
+            ax.axvline(x=1.5, color='k', label='axvline - full height')
+        if len(mod_order2) > 4:
+            ax.axvline(x=3.5, color='k', label='axvline - full height')
+        if len(mod_order2) > 6:
+            ax.axvline(x=5.5, color='k', label='axvline - full height')
+
+        # ax.axhline(y=1.0, color='k')
 
     plt.savefig(args.results_dir + "all_AUCs.png", bbox_inches="tight")
 
@@ -229,7 +257,7 @@ if __name__ == '__main__':
     parser.add_argument('--sr', type=str, default='c') #c, co
     parser.add_argument('--subset', type=str, default='test')
     parser.add_argument('--generate', type=bool, default=False, const=True, nargs='?', help='Regenerate aucs and ROC curves')
-    parser.add_argument('--embed_size', type=int, default=512, help='dimension of word embedding vectors')
+    parser.add_argument('--embed_size', type=int, default=128, help='dimension of word embedding vectors')
     parser.add_argument('--batch_size', type=int, default=32) #32 normally
     parser.add_argument('--results_dir',type=str, default='/n/data2/hms/dbmi/beamlab/anil/Med_ImageText_Embedding/results/zeroshot/')
     parser.add_argument('--dat_dir', type=str, default='/n/data2/hms/dbmi/beamlab/anil/Med_ImageText_Embedding/data/')

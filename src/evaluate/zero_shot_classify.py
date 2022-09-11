@@ -16,24 +16,25 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 def main(args):
-    heads = np.array(['covid19', 'Pneumonia', 'No Finding'])
+    heads = np.array(['Cardiomegaly', 'Edema', 'Consolidation', 'Atelectasis', 'Pleural Effusion'])
+    #heads2 = np.array(['Cardiomegaly', 'Edema', 'Consolidation', 'Atelectasis', 'Pleural Effusion', 'No Finding'])
     if args.subset == 'a' or args.subset == 'all':
         subset = ['all']
     elif args.subset == 't' or args.subset == 'test':
         subset = ['test']
     clip_model = CLIP_Embedding.getCLIPModel(args.je_model_path)
     filters = MedDataHelpers.getFilters(args.je_model_path)
-    #TODO: add frontal filters to coviddataset
-    modname = args.je_model_path[-5:-1]
+    modname = os.path.basename(args.je_model_path)
 
     dat = MedDataHelpers.getDatasets(source=args.sr, subset=subset, synthetic=False, filters = filters) #Real
-    DLs = MedDataHelpers.getLoaders(dat, args)
+    DLs = MedDataHelpers.getLoaders(dat, args, shuffle=False)
     DL = DLs[subset[0]]
 
     aucs, aucs_synth, aucs_adv, tprs, fprs, thresholds = {}, {}, {}, {}, {}, {}
     auroc = AUROC(pos_label=1)
 
-    test_preds, test_targets = utils.get_all_preds(DL, clip_model,similarity=True, heads=heads)
+    #utils.getLabelSimilarities(clip_model, heads2) #printing out headsimilarities
+    test_preds, test_targets = utils.get_all_preds(DL, clip_model,similarity=True, heads=heads, convirt=False)
     test_preds = test_preds[0].cpu()
     test_targets = test_targets.cpu()
     for i, h in enumerate(heads):
@@ -48,14 +49,15 @@ def main(args):
 
     #ROC Curve
     fig, ax = plt.subplots(figsize=(8, 8))
-    colors = {'covid19': 'r', 'Pneumonia': 'tab:orange', 'No Finding': 'g'}
+    colors = {'Atelectasis': 'r', 'Cardiomegaly': 'tab:orange', 'Consolidation': 'g', 'Edema': 'c',
+              'Pleural Effusion': 'tab:purple'}
     for i, h in enumerate(heads):
         ax.plot(fprs[h], tprs[h], color=colors[h], label=h + ", AUC = " + str(np.round(aucs[h], 4)))
     xrange = np.linspace(0, 1, 100)
     avgTPRS = np.zeros_like(xrange)
     for i, h in enumerate(heads):
         avgTPRS = avgTPRS + np.interp(xrange, fprs[h], tprs[h])
-    avgTPRS = avgTPRS / len(heads)
+    avgTPRS = avgTPRS / 5
     ax.plot(xrange, avgTPRS, color='k', label="Average, AUC = " + str(np.round(aucs['Total'], 4)))
     ax.set_ylim(0, 1)
     ax.set_xlim(0, 1)
@@ -64,7 +66,7 @@ def main(args):
     ax.set_xlabel("False Positive Rate", size=24)
     ax.set_ylabel("True Positive Rate", size=24)
     ax.legend(prop={'size': 16})
-    plt.savefig(args.results_dir + modname +  "covid_roc_curves.png", bbox_inches="tight")
+    plt.savefig(args.results_dir + modname +  "roc_curves.png", bbox_inches="tight")
 
 
 
@@ -72,9 +74,9 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--je_model_path', type=str, default='/n/data2/hms/dbmi/beamlab/anil/Med_ImageText_Embedding/models/clip_regularized/exp3/', help='path for saving trained models')
-    parser.add_argument('--sr', type=str, default='co') #c, co
-    parser.add_argument('--subset', type=str, default='all')
+    parser.add_argument('--je_model_path', type=str, default='/n/data2/hms/dbmi/beamlab/anil/Med_ImageText_Embedding/models/clip_regularized/exp7/', help='path for saving trained models')
+    parser.add_argument('--sr', type=str, default='c') #c, co
+    parser.add_argument('--subset', type=str, default='test')
     parser.add_argument('--embed_size', type=int, default=128, help='dimension of word embedding vectors')
     parser.add_argument('--batch_size', type=int, default=32) #32 normally
     parser.add_argument('--results_dir',type=str, default='/n/data2/hms/dbmi/beamlab/anil/Med_ImageText_Embedding/results/zeroshot/')

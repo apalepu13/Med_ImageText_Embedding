@@ -66,7 +66,7 @@ def main(args):
 
     # Build data
     if args.debug:
-        subset = ['tiny', 'tinyval']
+        subset = ['tinytrain', 'tinyval']
     else:
         subset = ['train', 'val']
 

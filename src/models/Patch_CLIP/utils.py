@@ -1,6 +1,6 @@
 import regex as re
-from Data_Loading import *
-import jointEmbedding
+from MedCLIP_Datasets import *
+import CLIP_Embedding
 import torch
 import torch.nn as nn
 import numpy as np
@@ -10,7 +10,16 @@ def getExperiment(args, mp):
     if args.debug:
         return "debug"
 
+    if args.resume and args.resume > 0:
+        fp =  os.path.join(mp, 'exp'+str(args.resume))
+        if os.path.exists(fp):
+            return fp
+        else:
+            raise Exception("Experiment doesn't exist, cannot resume exp " + fp)
+
     if not os.listdir(os.path.join(mp)):
+        if args.resume:
+            raise Exception("No experiment exist, cannot resume last one.")
         print("No models exist, creating directory")
         fp = os.path.join(mp, 'exp1')
     else:
@@ -37,7 +46,7 @@ def startExperiment(args, fp):
     Initialize variables for experiment:
     start (epoch), je_model, params, optimizer, best_val_loss
     '''
-    je_model = jointEmbedding.JointEmbeddingModel(args.embed_size).to(device)
+    je_model = CLIP_Embedding.MedCLIP(eval=False).to(device)
     params = list(je_model.parameters())
     optimizer = torch.optim.Adam(params, lr=args.learning_rate, weight_decay=0.000001)
     if fp == "debug":
@@ -65,37 +74,39 @@ def startExperiment(args, fp):
         if not args.debug:
             os.makedirs(fp)
             writeArgs(fp, args)
-            txt = args.desc
-            with open(os.path.join(fp, "desc.txt"), "w") as text_file:
-                text_file.write(txt)
     return start, je_model, params, optimizer, best_val_loss
 
-def attn_penalty(cross_weights, token_mask = None, soft = nn.Softmax(dim=2), lam = 1, steep_entropy = True):
-    #cross_weights:list(N, T, P)
-    #token_mask: N, T -> 1 if we want to count towards loss, 0 otherwise
+def attn_penalty(cross_weights, soft = nn.Softmax(dim=2), lam = (0.0, 0.0), steep_entropy = False):
     attn_loss = 0
     losses = []
+    eps = 1e-7
     for c in cross_weights:
-        probs = soft(c)
-
+        if lam[1] == 0: #only do the global text embedding
+            c = c[:, 0, :]
+        entropy = soft(c) + eps #NTP
         if not steep_entropy:
-            entropy = -probs * torch.log(probs)
-            entropy = torch.sum(entropy, dim=2) #N, T
-            entropy = torch.mean(entropy, dim=1) #N
-            entropy = torch.mean(entropy, dim=0) #1
+            entropy = -entropy * torch.log(entropy)
+            entropy_text = torch.sum(entropy, dim=2) #N, T
+            entropy_text = torch.mean(entropy_text, dim=(1, 0)) #1
+
+            entropy_im = soft(c.permute(0, 2, 1)) + eps
+            entropy_im = -entropy_im * torch.log(entropy_im)
+            entropy_im = torch.sum(entropy_im, dim=2) #N, P
+            entropy_im = torch.mean(entropy_im, dim=(1, 0)) # 1
         else:
-            lam = lam * 3
-            eps = 1e-7
-            P = probs.shape[2] #patches
-            scalescore = probs * P -1 #-1 - P-1
+            P = entropy.shape[2] #patches
+            scalescore = entropy * P -1 #-1 - P-1
             score1 = torch.sum(torch.relu(scalescore), dim=2) #add up all the pos values #0 if all 0.5, pos if high score exists
             score2 = torch.sum(torch.relu(-scalescore), dim=2) #add up all the neg values #0 if all 0.5, pos if many low scores
             score = (score1 + score2)/2
-            entropy = ((P-1 - score)/(P-1)) # 0-1, lower is better. Weird cuz not symmetric but thats fine i think
+            entropy = ((P-1 - score)/(P-1))
             entropy = torch.mean(entropy, dim=1)
-            entropy = torch.mean(entropy, dim=0)  # 1
-        loss = entropy * lam
-        losses.append(entropy)
+            entropy_text = torch.mean(entropy, dim=0)  # 1
+            entropy_im = 0 #Implement!!!
+
+
+        loss = (entropy_text * float(lam[0])) + (entropy_im * float(lam[1]))
+        losses.append(loss.cpu().detach())
         attn_loss += loss
     return attn_loss, losses #1
 
@@ -108,57 +119,56 @@ def clip_loss(im_logits, aug_logits = None, loss_weight = 1, criterion = nn.Cros
         loss_a = criterion(im_logits[i], samp.to(device))
         loss_b = criterion(text_logits[i], samp.to(device))
         closs = (loss_a + loss_b) / 2
-        losses.append(closs)
+        losses.append(closs.cpu().detach())
         clip_loss += closs * loss_weight
     if aug_logits is not None:
         for i in np.arange(len(aug_logits)):
             samp = torch.tensor(np.arange(im_logits[i].shape[0]))
             imloss = criterion(im_logits[i], samp.to(device))
-            losses.append(imloss)
+            losses.append(imloss.cpu().detach())
             clip_loss += imloss
     assert len(losses) == int((len(im_logits) + (len(im_logits) * (len(im_logits) -1)/2.0)))
     return clip_loss, losses
 
-def compute_loss(je_model, samples, tokenizer, args, attn_lam = 1):
+def compute_loss(je_model, samples, args, attn_lam_words = 0.0, attn_lam_patches = 0.0):
     ims = samples['images']
     texts = samples['texts']
-    ims = [im.to(device) for im in ims]
-    texts = tokenizer.encode(texts=texts).to(device)
     im_logits, crosses, aug_logits = je_model(ims, texts)
     cl, cl_losses = clip_loss(im_logits, aug_logits)
-    attn_pen, attn_losses = attn_penalty(crosses, token_mask = Transformer.get_mask(texts), lam = attn_lam, steep_entropy=args.steep_entropy)
+    attn_pen, attn_losses = attn_penalty(crosses, lam = (attn_lam_words, attn_lam_patches), steep_entropy=args.steep_entropy)
     cl_count = len(cl_losses)
     attn_count = len(attn_losses)
     loss = cl / cl_count + attn_pen / attn_count
     all_losses = cl_losses + attn_losses
     return loss, torch.tensor(all_losses)
 
-def train(train_data_loader, je_model, tokenizer, args, epoch, optimizer, total_step_mimic):
+def train(train_data_loader, je_model, args, epoch, optimizer, total_step_mimic):
     mean_loss, mean_losses, ct = 0.0, 0.0, 0
     for i, samples in enumerate(train_data_loader):
         je_model.zero_grad(set_to_none=True)
-        loss, all_losses = compute_loss(je_model, samples, tokenizer, args, attn_lam=args.lam)
+        loss, all_losses = compute_loss(je_model, samples, args, attn_lam_words=args.lam_words, attn_lam_patches = args.lam_patches)
         # Forward, backward and optimize
         loss.backward()
         optimizer.step()
         if i % args.log_step == 0:
             print('MIMIC Epoch [{}/{}], Step [{}/{}], Loss: {:.4f}'.format(epoch, args.num_epochs, i, total_step_mimic, loss.item()))
             print(all_losses)
-        mean_loss += loss
+        l = loss.cpu().detach().numpy()
+        mean_loss += l
         mean_losses += all_losses
         ct += 1
     if ct > 0:
         mean_loss = mean_loss/ct
         mean_losses = mean_losses/ct
 
-    return mean_loss.item(), mean_losses
+    return mean_loss, mean_losses
 
-def validate(val_data_loader, tokenizer, je_model, args):
+def validate(val_data_loader, je_model, args):
     val_losses = []
     avg_loss, ct = 0.0, 0
     with torch.no_grad():
         for j, samples in enumerate(val_data_loader):
-            loss, all_losses = compute_loss(je_model, samples, tokenizer, args, attn_lam=args.lam)
+            loss, all_losses = compute_loss(je_model, samples, args, attn_lam_words=args.lam_words, attn_lam_patches = args.lam_patches)
             val_losses.append(all_losses.view(-1,1))
             avg_loss += loss
             ct += 1
@@ -256,27 +266,68 @@ def getLabels(df, heads):
 
     return labels
 
-def get_all_preds(DL, mod, heads = ['covid19', 'No Finding'], device='cuda'):
-    tp, tt = None, None
-    for i, res in enumerate(DL):
-        try:
-            im1, im2, df, study = res
-        except:
-            im1, df = res
+def get_all_preds(DL, mod,similarity=False,im_embeds=False,patch_similarity=False, heads = ['covid19', 'No Finding'], convirt=True, getlabels=True):
+    with torch.no_grad():
+        if similarity or patch_similarity:
+            label_embeds = CLIP_Embedding.getLabelEmbeddings(mod, heads, convirt=convirt)
+            embed_list = [label_embeds[h][None, :] for h in heads]
+            label_embeds = torch.cat(embed_list, dim=0)
+            label_embeds = label_embeds/label_embeds.norm(dim=1, keepdim=True)
 
-        images = im1.to(device)
-        preds = mod(images).to(device)
-        labels = getLabels(df, heads).to(device)
+        for i, samples in enumerate(DL):
+            images = samples['images']
+            if i == 0:
+                tt = []
+                tps = [[] for im in images]
 
-        if tp is None:
-            tp = preds
+            if similarity:
+                list_im_embeds = mod.get_im_embeddings(images, only_ims = True)
+                list_im_embeds = [im_embeds/im_embeds.norm(dim=1, keepdim=True) for im_embeds in list_im_embeds]
+                # N P E x c E = N c
+                list_preds = [im_embeds @ label_embeds.t() for im_embeds in list_im_embeds]
+            elif patch_similarity:
+                list_im_embeds = mod.get_im_embeddings(images, only_patches=True) #N E P1 P2
+                list_im_embeds = [im_embeds.reshape(im_embeds.shape[0], im_embeds.shape[1], im_embeds.shape[2] * im_embeds.shape[3]).permute(0, 2, 1) for im_embeds in list_im_embeds] #N P E
+                list_im_embeds = [im_embeds/im_embeds.norm(dim=2, keepdim=True) for im_embeds in list_im_embeds]
+                # N P E x c E = N P c
+                list_preds = [torch.bmm(im_embeds, label_embeds.t()[None, :, :].repeat(im_embeds.shape[0], 1, 1)) for im_embeds in list_im_embeds]
+            elif im_embeds:
+                list_im_embeds = mod.get_im_embeddings(images, only_ims=True)
+                list_preds = [im_embeds / im_embeds.norm(dim=1, keepdim=True) for im_embeds in list_im_embeds]
+
+            labels = getLabels(samples['labels'], heads) if getlabels else None
+
+            for j, pred in enumerate(list_preds):
+                tps[j].append(pred.cpu())
+            tt.append(labels) if getlabels else None
+
+        tplist = [torch.cat(tp, axis=0) for tp in tps]
+        tt = torch.cat(tt, axis=0) if getlabels else None
+        return tplist, tt
+
+def normalize(img):
+    img[:, 0, :, :] = (img[:, 0, :, :] * .229) + .485
+    img[:, 1, :, :] = (img[:, 1, :, :] * .224) + .456
+    img[:, 2, :, :] = (img[:, 2, :, :] * .225) + .406
+    img = img.permute(0, 2, 3, 1)[0, :, :, :].squeeze()
+    return img
+
+def getLabelSimilarities(mod, heads, label_embeds=None, compare_mimic = False):
+    with torch.no_grad():
+        if compare_mimic:
+            label_embeds = CLIP_Embedding.getLabelEmbeddings(mod, heads)
+            label_embeds_mimic = CLIP_Embedding.getLabelEmbeddings(mod, heads, convirt=False)
+            for i, h in enumerate(heads):
+                print(h, torch.dot(label_embeds[h] / label_embeds[h].norm(dim=-1, keepdim=True),
+                                       label_embeds_mimic[h] / label_embeds_mimic[h].norm(dim=-1, keepdim=True)).cpu())
         else:
-            tp = torch.cat((tp, preds), axis=0)
-        if tt is None:
-            tt = labels
-        else:
-            tt = torch.cat((tt, labels), axis=0)
+            if not label_embeds:
+                label_embeds = CLIP_Embedding.getLabelEmbeddings(mod, heads)
+            for i, h in enumerate(heads):
+                for j, h2 in enumerate(heads):
+                    if i < j:
+                        print(h, h2, torch.dot(label_embeds[h] / label_embeds[h].norm(dim=-1, keepdim=True),
+                                               label_embeds[h2] / label_embeds[h2].norm(dim=-1, keepdim=True)).cpu())
 
-    return tp, tt
 
 
