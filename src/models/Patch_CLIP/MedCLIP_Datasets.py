@@ -5,12 +5,14 @@ from PIL import Image
 import MedDataHelpers
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms, utils
+import re
+
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 class MedDataset(Dataset):
     """Chx - Report dataset.""" #d
     def __init__(self, source = 'mimic_cxr', group='train', im_aug = 1,
-                 synth = False, get_good = False, get_adversary = False, overwrite = False,
+                 synth = False, get_good = False, get_adversary = False, overwrite = False, get_random=False,
                  out_heads = ['Cardiomegaly', 'Edema', 'Consolidation', 'Atelectasis', 'Pleural Effusion'],
                  filters = []):
         # filepaths
@@ -25,14 +27,18 @@ class MedDataset(Dataset):
         fps['covid_chestxray_csv_file'] = '/n/data2/hms/dbmi/beamlab/covid19qu/infection_dat/data_list.csv'
         fps['medpix_root_dir'] = '/n/data2/hms/dbmi/beamlab/medpix/'
         fps['medpix_file'] = 'medpix_case_data_table.csv'
-        sourceDict = {'m': 'mimic_cxr', 'ms': 'ms_cxr', 'i': 'indiana_cxr', 'c': 'chexpert', 'co': 'covid-chestxray', 'med': 'medpix'}
+        fps['padchest_root_dir'] = '/n/data2/hms/dbmi/beamlab/padchest/'
+        fps['padchest_file'] = '/n/data2/hms/dbmi/beamlab/padchest/PADCHEST_chest_x_ray_images_labels_160K_01.02.19.csv.gz'
+        sourceDict = {'m': 'mimic_cxr', 'ms': 'ms_cxr', 'i': 'indiana_cxr', 'c': 'chexpert', 'co': 'covid-chestxray', 'med': 'medpix', 'p':'padchest'}
 
         #setting attributes
         self.heads = out_heads
-        self.synth, self.get_good, self.get_adversary, self.overwrite = synth, get_good, get_adversary, overwrite
+        self.synth, self.get_good, self.get_adversary, self.overwrite, self.get_random = synth, get_good, get_adversary, overwrite, get_random
         self.source = (sourceDict[source] if source in sourceDict.keys() else source)
         self.group = group
         self.im_aug = im_aug
+        self.get_orig = True
+        self.get_findings = 'impression' not in filters
 
         # Image processing
         self.im_preprocessing_train = transforms.Compose([
@@ -85,6 +91,8 @@ class MedDataset(Dataset):
             sample['images'] = images
             sample['labels'] = df.to_dict()
             sample['texts'] = ims.loc['text'] #ims, df, text
+            if self.get_findings:
+                sample['findings'] = ims.loc['findings']
             return sample
 
         elif self.source == 'indiana_cxr':
@@ -113,12 +121,32 @@ class MedDataset(Dataset):
             if self.synth:
                 incorrect = [s for s in self.heads if df[s] != 1.0]
                 correct = [s for s in self.heads if df[s] == 1.0]
-                image = MedDataHelpers.make_synthetic(image, incorrect, correct, overwrite = self.overwrite, get_adversary=self.get_adversary, get_good=self.get_good)
+                image = MedDataHelpers.make_synthetic(image, incorrect, correct, overwrite = self.overwrite, get_adversary=self.get_adversary, get_good=self.get_good, get_random=self.get_random)
             image = self.im_finish(image)
             df = df.loc[self.heads]
             sample['images'] = [image]
             sample['labels'] = df.to_dict()
+            sample['study'] = str(re.search("(.*study\d+)", img_name).group(0))
             return sample #ims, df
+
+        elif self.source == 'chextest':
+            df = self.im_list.iloc[idx, :]
+            img_name = df['im_path']
+            image = Image.open(img_name)
+            image = self.im_preprocessing_test(image)
+            if self.get_orig:
+                sample['orig_image'] = self.totensor(image.copy())
+            sample['labels'] = df.to_dict()
+            sample['study'] = str(re.search("(.*study\d+)", img_name).group(0))
+            image = image.convert("RGB")
+            if self.synth:
+                incorrect = [s for s in self.heads if df[s] != 1.0]
+                correct = [s for s in self.heads if df[s] == 1.0]
+                image = MedDataHelpers.make_synthetic(image, incorrect, correct, overwrite=self.overwrite,
+                                                      get_adversary=self.get_adversary, get_good=self.get_good, get_random=self.get_random)
+            image = self.im_finish(image)
+            sample['images'] = [image]
+            return sample
 
         elif self.source == 'covid-chestxray':
             df = self.im_list.iloc[idx, :]
@@ -137,10 +165,25 @@ class MedDataset(Dataset):
             sample['inf_mask'] = inf_mask
             sample['lung_mask'] = lung_mask
             return sample
+        elif self.source == 'padchest':
+            df = self.im_list.iloc[idx, :]
+            img_name = df['im_path']
+            image = Image.open(img_name)
+            image = Image.fromarray(np.divide(np.array(image), 2 ** 8 - 1))
+            image = image.convert("RGB")
+            image = self.im_preprocessing_test(image)
+            image = self.im_finish(image)
+
+            sample['images'] = [image]
+            df = df.iloc[1:]
+            sample['labels'] = df.to_dict() #labels and image pairs seems right
+
+
+            return sample
 
 if __name__=='__main__':
-    train_dat = MedDataset(source = 'mimic_cxr', group = 'tinyval', synth=False, im_aug=3, filters=['frontal', 'findings'])
-    for i in np.arange(33,36):
+    train_dat = MedDataset(source = 'padchest', group = 'tinyall')
+    for i in np.arange(0,1):
         result = train_dat.__getitem__(i)
         print(result['labels'])
 

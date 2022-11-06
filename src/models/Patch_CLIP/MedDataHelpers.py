@@ -4,15 +4,19 @@ import numpy as np
 from PIL import ImageFont
 from PIL import ImageDraw
 import MedCLIP_Datasets
+import torch
 from torch.utils.data import Dataset, DataLoader
 import Report_Parser
 import re
 from sklearn.model_selection import GroupShuffleSplit
+from sklearn.preprocessing import MultiLabelBinarizer
+import ast
+import random
 
 def getDatasets(source, subset = ['train', 'val', 'test'],
                 synthetic = False, get_good=False, get_adversary = False, get_overwrites=False, augs = 1,
                 heads = ['Cardiomegaly', 'Edema', 'Consolidation', 'Atelectasis', 'Pleural Effusion'],
-                filters = [], frontal = False, lateral = False):
+                filters = [], frontal = False, lateral = False, get_random=False, overwrite = False):
     '''
     Returns a dictionary of ImageText_Dataset subsets from a given source
     Can specify synthetic/real data, #augmentations, any filters, and relevant labels
@@ -31,28 +35,35 @@ def getDatasets(source, subset = ['train', 'val', 'test'],
     if get_overwrites:
         for h in heads:
             mydat = MedCLIP_Datasets.MedDataset(source=s, group=subset[0], synth=True, overwrite=[h], get_good=get_good,
-                                            get_adversary=get_adversary, im_aug = augs, filters = filters)
+                                            get_adversary=get_adversary, im_aug = augs, filters = filters, get_random=get_random)
             datlist[h] = mydat
     else:
         for sub in subset:
             mydat = MedCLIP_Datasets.MedDataset(source=s, group=sub, synth=synthetic, get_good=get_good, get_adversary=get_adversary,
-                                              out_heads = heads, im_aug = augs, filters = filters)
+                                              out_heads = heads, im_aug = augs, filters = filters, get_random=get_random, overwrite=overwrite)
             datlist[sub] = mydat
     return datlist
 
-def getLoaders(datasets, args=None, shuffle=True):
+def collate_fn(batch):
+    batch = list(filter(lambda x: x is not None, batch))
+    return torch.utils.data.dataloader.default_collate(batch)
+
+def getLoaders(datasets, args=None, shuffle=True, bsize=32, drop_last =False, zeroworkers = False):
     '''
     Returns dataloaders for each dataset in datasets
     '''
     subset = datasets.keys()
-    num_work = min(os.cpu_count(), 16)
-    num_work = num_work if num_work > 1 else 0
-    batch_size = args.batch_size if args else 32
+    if not zeroworkers:
+        num_work = min(os.cpu_count(), 16)
+        num_work = num_work if num_work > 1 else 0
+    else:
+        num_work = 0
+    batch_size = args.batch_size if args else bsize
     prefetch_factor = 2
     loaders = {}
     for sub in subset:
         loaders[sub] = DataLoader(datasets[sub], batch_size=batch_size, shuffle=shuffle, num_workers=num_work,
-                                  prefetch_factor=prefetch_factor, pin_memory=True)
+                                  prefetch_factor=prefetch_factor, pin_memory=True, drop_last = drop_last, collate_fn=collate_fn)
     return loaders
 
 def getFilters(exp_path, overwrite = '', toprint=True): #return filters that were used to train an experiment, if possible
@@ -62,6 +73,8 @@ def getFilters(exp_path, overwrite = '', toprint=True): #return filters that wer
     Alternatively, can overwrite the filters used
     '''
     try:
+        if overwrite == '':
+            return []
         if overwrite is not '' and type(overwrite) == str:
             if toprint:
                 print("Overwriting filters with " + overwrite)
@@ -103,9 +116,17 @@ def getImList(sr, group, fps, heads=['Cardiomegaly', 'Edema', 'Consolidation', '
         il['sName'] = np.array(["s" + sn for sn in il['study_id'].values.astype(str)])
         if 'findings' in filters:
             il['text'] = il.apply(lambda row: Report_Parser.parse_report(row, rd, findings_only=True), axis=1)
+            il = il[il['text'] != ""]
+        elif 'impression' in filters:
+            il['text'] = il.apply(lambda row: Report_Parser.parse_report(row, rd, impression_only=True), axis=1)
+            il = il[il['text'] != ""]
         else:
-            il['text'] = il.apply(lambda row: Report_Parser.parse_report(row, rd, findings_impressions=True), axis=1)
-        il = il[il['text'] != ""]
+            il['text'] = il.apply(lambda row: Report_Parser.parse_report(row, rd, impression_only=True), axis=1)
+            il['findings'] = il.apply(lambda row: Report_Parser.parse_report(row, rd, findings_only=True), axis=1)
+            il['impression'] = il['text']
+            il = il[il['findings'] != ""]
+            il = il[il['impression'] != ""]
+
 
         if sr == 'mscxr':
             ms_il = pd.read_csv(rd + "ms-cxr/MS_CXR_Local_Alignment_v1.0.0.csv")
@@ -136,10 +157,36 @@ def getImList(sr, group, fps, heads=['Cardiomegaly', 'Edema', 'Consolidation', '
             test = test[test['Frontal/Lateral'] == 'Lateral']
         if group == 'test':
             il = test
+
         elif group != 'all':
             il = getSplits(il_train, group, 'chexpert', heads)
         else:
             il = pd.concat((il_train, test), axis=0)
+
+    elif sr == 'chextest':
+        rd = fps['chexpert_root_dir']
+        il = pd.read_csv(rd + 'test_set/groundtruth.csv')
+        rad1 = pd.read_csv(rd + 'test_set/radiologists/benchmark_radiologists/bc4.csv')
+        rad2 = pd.read_csv(rd + 'test_set/radiologists/benchmark_radiologists/bc6.csv')
+        rad3 = pd.read_csv(rd + 'test_set/radiologists/benchmark_radiologists/bc8.csv')
+        il = il.merge(rad1, on=['Study'], suffixes = (None, "_rad1"))
+        il = il.merge(rad2, on=['Study'], suffixes=(None, "_rad2"))
+        il = il.merge(rad3, on=['Study'], suffixes=(None, "_rad3"))
+        print(il.shape)
+        print(il.head())
+
+        il["Study"] = il["Study"].apply(lambda x: "" + x[14:])
+        il["fullstudypath"] = rd + 'test_set/' + il["Study"]
+
+        df = pd.DataFrame({'fullstudypath': pd.Series(dtype='str'),
+                           'im_path': pd.Series(dtype='str')})
+        for fsp in il["fullstudypath"].values:
+            ims = os.listdir(fsp)
+            for im in ims:
+                df = df.append({'fullstudypath': fsp, 'im_path': fsp + "/" + im}, ignore_index=True)
+        il = il.merge(df, on=['fullstudypath'], how='right')
+
+        return il, rd
 
     elif sr == 'covid-chestxray':
         rd = fps['covid_chestxray_csv_file']
@@ -152,6 +199,62 @@ def getImList(sr, group, fps, heads=['Cardiomegaly', 'Edema', 'Consolidation', '
             il = il[il['group'].str.contains(group)]
         if 'tiny' in group:
             il = il[::50]
+
+    elif sr == 'padchest':
+        rd = fps['padchest_root_dir']
+        il = pd.read_csv(fps['padchest_file'], compression='gzip', header=0)
+        il['im_path'] = rd + il['ImageDir'].astype(str) + '/' + il['ImageID']
+        if 'frontal' in filters:
+            il = il[il['Projection'].str.contains('AP|PA')]
+        elif 'lateral' in filters:
+            il = il[~il['Projection'].str.contains('AP|PA')]
+
+        il = il[il['MethodLabel'] == 'Physician']
+        if 'tiny' in group:
+            il = il[::10]
+
+        il = il.loc[:, ['im_path', 'Labels']]
+        labellist = il.pop('Labels').values.astype(str)
+        outlist = []
+        for i, l in enumerate(labellist):
+            try:
+                outlist.append(ast.literal_eval(l))
+            except:
+                outlist.append([])
+
+        print(type(outlist[0]))
+        mlb = MultiLabelBinarizer(sparse_output=False)
+        toadd = pd.DataFrame(
+            mlb.fit_transform(outlist),
+            index=il.index,
+            columns=mlb.classes_)
+        print(toadd.sum())
+
+        high_importance = ['COPD signs', 'endotracheal tube', 'pleural effusion', 'pulmonary edema', 'heart insufficiency',
+                           'pulmonary fibrosis', 'cardiomegaly', 'vascular redistribution', 'consolidation', 'hilar congestion',
+                           'pulmonary mass', 'cavitation', 'alveolar pattern', 'calcified pleural thickening', 'lung metastasis',
+                           'emphysema', 'interstitial pattern', 'costophrenic angle blunting','tuberculosis','atelectasis',
+                           'reticular interstitial pattern','pneumonia','lobar atelectasis','normal', 'pleural thickening',
+                           'reticulonodular interstitial pattern','infiltrates','hypoexpansion','hypoexpansion basal',
+                           'humeral fracture','pneumothorax','multiple nodules','hyperinflated lung', 'bronchiectasis',
+                           'adenopathy','mediastinal enlargement','laminar atelectasis','vertebral compression','rib fracture',
+                           'tuberculosis sequelae', 'hilar enlargement', 'tracheal shift', 'mediastinal mass', 'central vascular redistribution',
+                           'vertebral fracture','superior mediastinal enlargement','vascular hilar enlargement','nodule',
+                           'air trapping','bullas', 'ground glass pattern', 'calcified adenopathy', 'minor fissure thickening',
+                           'unchanged', 'clavicle fracture','pseudonodule','end on vessel']
+        print(len(high_importance))
+        for h in high_importance:
+            try:
+                assert h in toadd.columns
+            except:
+                print(h)
+        toadd = toadd.loc[:, high_importance]
+        #toadd = toadd.loc[:, toadd.sum() >=50]
+        print(toadd.head())
+        il = il.join(toadd)
+        print(il.head())
+
+
 
     elif sr == 'medpix':
         rd = fps['medpix_root_dir']
@@ -171,6 +274,9 @@ def getSplits(df, group, sr='mimic_cxr', heads=['Cardiomegaly', 'Edema', 'Consol
     if sr == 'mimic_cxr':
         if 'tiny' in group:
             df = splitDF(df, 'subject_id', 0.01)[1]
+        elif 'med' in group:
+            df = splitDF(df, 'subject_id', 0.3)[1]
+
         train, val = splitDF(df, 'subject_id', 0.1)  # train, val
         if 'train' in group:
             df = train
@@ -186,14 +292,15 @@ def getSplits(df, group, sr='mimic_cxr', heads=['Cardiomegaly', 'Edema', 'Consol
             df = df[df['patient'].values % 7 == 0]
 
     elif sr == 'chexpert':
-        il_unseen, il_finetune = splitDF(df, 'patName', 0.01)
-        il_finetune_train, il_finetune_val = splitDF(il_finetune, 'patName', 0.2)
+        il_unseen, il_finetune = splitDF(df, 'patName', 0.1)
+        il_finetune_train, il_finetune_val = splitDF(il_finetune, 'patName', 0.1)
         if 'train' in group:
             df = il_finetune_train
         elif 'val' in group:
             df = il_finetune_val
         elif 'candidates' in group or 'queries' in group:
             il = df
+            il = il.drop_duplicates(subset=['patName'])
             temp = il.loc[:, heads]
             tempsum = (temp.values == 1).sum(axis=1) == 1
             unknownsum = (temp.values == -1).sum(axis=1) == 0
@@ -212,6 +319,8 @@ def splitDF(df, patientID, testsize=0.2):
     '''
     Splitting data with given test size with all data from a given patient in one group
     '''
+    if testsize == 1.0:
+        return df, df
     splitter = GroupShuffleSplit(test_size=testsize, n_splits=1, random_state=1)
     split = splitter.split(df, groups=df[patientID])
     train_inds, valtest_inds = next(split)
@@ -227,7 +336,7 @@ def textProcess(text):
     else:
         return "NO FINDINGS"
 
-def draw_watermark(image, shortcut_list):
+def draw_watermark(image, shortcut_list, shufflewatermarks=False):
     shortcutDict = {'Atelectasis': 'A', 'Cardiomegaly': 'C', 'Consolidation': 'N', 'Edema': 'E',
                     'Pleural Effusion': 'P',
                     'A': 'A', 'C': 'C', 'N': 'N', 'E': 'E', 'P': 'P'}
@@ -236,13 +345,13 @@ def draw_watermark(image, shortcut_list):
     draw = ImageDraw.Draw(watermark_image)
     font = ImageFont.truetype("/usr/share/fonts/urw-base35/P052-Roman.otf", 30)
     for s in shortcut_list:
-        swrite = shortcutDict[s]
+        swrite = shortcutDict[s] if not shufflewatermarks else random.choice(['A', 'C', 'N', 'E', 'P'])
         change = np.random.randint(11, size=2) - 5
         sloc = (locDict[swrite] + change[0], 20 + change[1])
         draw.text(sloc, swrite, (255, 255, 255), font=font)
     return watermark_image
 
-def make_synthetic(image, incorrect=[], correct=[], p_watermark=.9, p_correct=.9, overwrite=False, get_good=False, get_adversary=False):
+def make_synthetic(image, incorrect=[], correct=[], p_watermark=.9, p_correct=.9, overwrite=False, get_good=False, get_adversary=False, get_random=False):
     '''
     image: original image
     incorrect, correct: the wrong/right labels
@@ -255,6 +364,8 @@ def make_synthetic(image, incorrect=[], correct=[], p_watermark=.9, p_correct=.9
         p_watermark, p_correct = 1, 0
     elif get_good:
         p_watermark, p_correct = 1, 1
+    elif get_random:
+        p_watermark, p_correct = 0.5, 1
 
     do_watermark, do_correct = np.random.random((2,))
     do_watermark = do_watermark < p_watermark
@@ -262,7 +373,7 @@ def make_synthetic(image, incorrect=[], correct=[], p_watermark=.9, p_correct=.9
     if do_watermark or overwrite:
         if not overwrite:
             mylist = (correct if do_correct else incorrect)
-            watermark_image = draw_watermark(image, mylist)
+            watermark_image = draw_watermark(image, mylist, shufflewatermarks = get_random)
         else:
             if get_good:
                 mylist = [o for o in overwrite if o in correct]

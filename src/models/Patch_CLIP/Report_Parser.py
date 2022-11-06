@@ -28,7 +28,7 @@ class MIMIC_RE(object):
     def sub_id(self, tag, repl, string, flags=0):
         return self.get_id(tag).sub(repl, string)
 
-def parse_report(row, rdpath, findings_only=False, findings_impressions=False):
+def parse_report(row, rdpath, findings_only=False,impression_only=False, findings_impressions=False):
     mimic_re = MIMIC_RE()
     path = os.path.join(rdpath, row['pGroup'], row['pName'], row['sName'], row['sName'] + '.txt')
     with open(path, 'r') as f:
@@ -78,6 +78,11 @@ def parse_report(row, rdpath, findings_only=False, findings_impressions=False):
     if findings_only:
         if 'findings' in parsed_report:
             return parsed_report['findings']
+        else:
+            return ""
+    elif impression_only:
+        if 'impression' in parsed_report:
+            return parsed_report['impression']
         else:
             return ""
     elif findings_impressions:

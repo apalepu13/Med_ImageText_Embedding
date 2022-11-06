@@ -42,6 +42,7 @@ def call_model_function_ig(img, call_model_args, expected_keys):
     grads = torch.movedim(grads[0], 1, 3)
     #print("final:", grads.shape)
     gradients = grads.cpu().detach().numpy()
+    #print(gradients.shape)
     try:
         return {saliency.INPUT_OUTPUT_GRADIENTS: gradients}
     except:
@@ -61,12 +62,12 @@ def call_model_function_oc(img, call_model_args, expected_keys):
     return {saliency.OUTPUT_LAYER_VALUES: gradients}
 
 
-def plot_ig_saliency(img, target, model, ax, use_abs = False, to_plot=True, method='blur_ig'):
+def plot_ig_saliency(img, target, model, ax, use_abs = False, to_plot=True, method='integrated_gradients'):
     headsDict = {'Cardiomegaly': 0, 'Edema': 1, 'Consolidation': 2, 'Atelectasis': 3, 'Pleural Effusion': 4,'No Finding': 5}
     if method == 'integrated_gradients':
-        ig = saliency.IntegratedGradient()
+        ig = saliency.IntegratedGradients()
         baseline = np.zeros(img.shape)
-        sig = ig.GetSmoothedMask(img, call_model_function_ig, {'model':model, 'targind':headsDict[target]}, x_steps=5, x_baseline=baseline, batch_size=20)
+        sig = ig.GetSmoothedMask(img, call_model_function_ig, {'model':model, 'targind':headsDict[target]}, x_steps=5, x_baseline=baseline, batch_size=5)
     elif method == 'guided_ig':
         ig = saliency.GuidedIG()
         baseline = np.zeros(img.shape)
@@ -74,11 +75,14 @@ def plot_ig_saliency(img, target, model, ax, use_abs = False, to_plot=True, meth
     elif method == 'blur_ig':
         ig = saliency.BlurIG()
         sig = ig.GetSmoothedMask(img, call_model_function_ig, {'model': model, 'targind':headsDict[target]})
+    elif method == 'xrai':
+        ig = saliency.XRAI()
+        baselines = [np.zeros(img.shape), np.ones(img.shape)]
+        sig = ig.GetSmoothedMask(img, call_model_function_ig, {'model':model, 'targind':headsDict[target]}, baselines=baselines, batch_size=5, magnitude=True)
     else:
         oc = saliency.Occlusion()
         sig = oc.GetSmoothedMask(img, call_model_function_oc, {'model':model, 'targind':headsDict[target]}, size=15, value=0)
 
-    print(target, np.min(sig), np.max(sig))
     if use_abs:
         gs = saliency.VisualizeImageGrayscale(sig)
         v_min, v_max = 0, 1
@@ -161,7 +165,8 @@ def main(args):
         plotAttributions(sample, ax[0, 2],sim_model, heads2[2])
         plotAttributions(sample, ax[1, 2], sim_model, heads2[3])
         plt.savefig(args.results_dir + 'Img' + str(i) + '_igs.png', bbox_inches='tight')
-        break
+        if i == 1:
+            break
 
 
 

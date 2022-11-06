@@ -33,14 +33,21 @@ def get_heats(im_sims, heads):
     heats = {}
     for i, h in enumerate(heads):
         heatmap_res = im_sims[:, :, i].squeeze() #N P
-        heatmap_res = autoscale(heatmap_res, low_percentile=50)
+        heatmap_res = autoscale(heatmap_res)
         heatmap_res = torch.reshape(heatmap_res, (heatmap_res.shape[0], 1, int(np.sqrt(heatmap_res.shape[1])), int(np.sqrt(heatmap_res.shape[1])))) #N 1 p p
         heats[h] = torch.nn.functional.interpolate(heatmap_res, 224) #N 1 224 224
     return heats
 
-def plot_heat(sample, ax, dataheads, heats,head='covid19', index=0):
-    ax.imshow(heats[head][index, :, :, :].squeeze(), cmap='plasma', alpha=0.95, vmin=0, vmax=1)
-    ax.set_title(head)
+def get_avg_ig(index, heads, heats):
+    igs = []
+    for h in heads:
+        igs.append(heats['No Finding'][index, :, :, :])
+    igs = torch.stack(igs).mean(dim=0, keepdims=False).squeeze()
+    return igs
+
+def plot_heat(sample, ax, dataheads, heats,head='covid19', index=0, avgig = 0, name=""):
+    ax.imshow(heats[head][index, :, :, :].squeeze()-avgig, cmap='coolwarm', alpha=0.95, vmin=-0.3, vmax=0.5)
+    ax.set_title(head + name)
     plot_original_image(sample, ax, dataheads, alpha=0.3, title=False)
 
 def autoscale(heats_all, high_percentile = 99, low_percentile=1):
@@ -55,40 +62,44 @@ def main(args):
     else:
         heads1 = np.array(['Cardiomegaly', 'Edema', 'Consolidation', 'Atelectasis', 'Pleural Effusion'])
         heads2 = np.array(['Cardiomegaly', 'Edema', 'Consolidation', 'Atelectasis', 'Pleural Effusion', 'No Finding'])
+    unreg_model = CLIP_Embedding.getCLIPModel(args.je_model_path_unreg)
     clip_model = CLIP_Embedding.getCLIPModel(args.je_model_path)
     filters = MedDataHelpers.getFilters(args.je_model_path)
     # TODO: add frontal filters to coviddataset
     modname = args.je_model_path[-5:-1]
-    dat = MedDataHelpers.getDatasets(source=args.sr, subset=[args.subset], heads=heads1, filters=filters)
+    dat = MedDataHelpers.getDatasets(source=args.sr, subset=[args.subset], heads=heads1, filters=filters,)
+    #dat = MedDataHelpers.getDatasets(source=args.sr, subset=[args.subset], heads=heads1, filters=filters, synthetic=True, overwrite = ['Cardiomegaly'])
     DLS = MedDataHelpers.getLoaders(dat, args, shuffle=False)
     DL = DLS[args.subset]
+
+    unreg_sims, _ = utils.get_all_preds(DL, unreg_model, patch_similarity=True, heads = heads2, getlabels=False)
+    unreg_sims = unreg_sims[0]
     im_sims, _ = utils.get_all_preds(DL, clip_model, patch_similarity=True, heads = heads2, getlabels=False) #N P c
     im_sims = im_sims[0] #only 1 image prediction (no augmentations) N P len(heads2)
     print(im_sims.shape)
     heats = get_heats(im_sims, heads2)
+    unreg_heats = get_heats(unreg_sims, heads2)
+    nofinding=False
     for i, sample in enumerate(DL):
-        fig, ax = plt.subplots(2, 3, figsize=(12, 8))
-        plot_original_image(sample, ax[0, 0], heads1, index=i)
-        if args.sr == 'co':
-            plot_lung_mask(sample, ax[1, 0])
-        else:
-            plot_heat(sample, ax[1, 0], heads1, heats, heads2[4], index=i)
-        plot_heat(sample, ax[0, 1], heads1, heats, heads2[0], index=i)
-        plot_heat(sample, ax[1, 1], heads1, heats, heads2[1], index=i)
-        plot_heat(sample, ax[0, 2], heads1, heats,  heads2[2], index=i)
-        plot_heat(sample, ax[1, 2], heads1, heats,  heads2[3], index=i)
-        plt.savefig(args.results_dir + 'Img' + str(i) + '_heatmaps.png', bbox_inches='tight')
+        avgig = get_avg_ig(i, heads2, heats) if not nofinding else 0
+        avg_unreg = get_avg_ig(i, heads2, unreg_heats) if not nofinding else 0
+
+        fig, ax = plt.subplots(1, 3, figsize=(12, 8))
+        plot_original_image(sample, ax[0], heads1, index=i)
+        plot_heat(sample, ax[1], heads1, unreg_heats, heads2[0], index=i, avgig=avg_unreg, name=" unregularized")
+        #plot_heat(sample, ax[1, 1], heads1, heats, heads2[1], index=i, avgig=avgig)
+        plot_heat(sample, ax[2], heads1, heats,  heads2[0], index=i, avgig = avgig, name=" regularized")
+        #plot_heat(sample, ax[1, 2], heads1, heats,  heads2[3], index=i, avgig = avgig)
+        #plt.savefig(args.results_dir + 'Img' + str(i) + '_heatmaps.png', bbox_inches='tight')
+        plt.savefig(args.results_dir + 'Img' + str(i) + '_synthnormheatmaps.png', bbox_inches='tight')
         if i == 1:
             break
 
 
-
-
-
-
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--je_model_path', type=str, default='/n/data2/hms/dbmi/beamlab/anil/Med_ImageText_Embedding/models/clip_regularized/exp10/', help='path for saving trained models')
+    parser.add_argument('--je_model_path_unreg', type=str, default='/n/data2/hms/dbmi/beamlab/anil/Med_ImageText_Embedding/models/synth_clip_regularized/exp3/')
+    parser.add_argument('--je_model_path', type=str, default='/n/data2/hms/dbmi/beamlab/anil/Med_ImageText_Embedding/models/synth_clip_regularized/exp2/', help='path for saving trained models')
 
     parser.add_argument('--sr', type=str, default='c')
     parser.add_argument('--subset', type=str, default='test')

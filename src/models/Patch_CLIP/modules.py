@@ -26,11 +26,13 @@ class MLP(nn.Module):
         if use_1x1_convs:
             linear_proj_1_args = {'in_channels': input_dim, 'out_channels': hidden_dim, 'kernel_size': 1, 'bias': False}
             linear_proj_2_args = {'in_channels': hidden_dim, 'out_channels': output_dim, 'kernel_size': 1, 'bias': True}
+            linear_proj_12_args = {'in_channels': input_dim, 'out_channels': output_dim, 'kernel_size': 1, 'bias': True}
             normalisation_layer: Callable = nn.BatchNorm2d
             projection_layer: Callable = nn.Conv2d
         else:
             linear_proj_1_args = {'in_features': input_dim, 'out_features': hidden_dim, 'bias': False}
             linear_proj_2_args = {'in_features': hidden_dim, 'out_features': output_dim, 'bias': True}
+            linear_proj_12_args = {'in_channels': input_dim, 'out_channels': output_dim, 'kernel_size': 1, 'bias': True}
             normalisation_layer = nn.BatchNorm1d
             projection_layer = nn.Linear
 
@@ -43,7 +45,10 @@ class MLP(nn.Module):
                 nn.ReLU(inplace=True),
                 projection_layer(**linear_proj_2_args))
         else:
-            self.model = nn.Linear(input_dim, output_dim)  # type: ignore
+            #self.model = nn.Linear(input_dim, output_dim)  # type: ignore
+            self.model = nn.Sequential(
+                projection_layer(**linear_proj_12_args)
+            )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """forward pass of the multi-layer perceptron"""
@@ -60,7 +65,7 @@ class MultiTaskModel(nn.Module):
     :param num_tasks: Number of classification tasks or heads required.
     """
 
-    def __init__(self, input_dim: int, classifier_hidden_dim: Optional[int], num_classes: int, num_tasks: int):
+    def __init__(self, input_dim: int, classifier_hidden_dim: Optional[int], num_classes: int, num_tasks: int, project=False):
 
         super().__init__()
 
@@ -77,5 +82,5 @@ class MultiTaskModel(nn.Module):
         out = torch.zeros((batch_size, self.num_classes, self.num_tasks), dtype=x.dtype, device=x.device)
         for task in range(self.num_tasks):
             classifier = getattr(self, "fc_" + str(task))
-            out[:, :, task] = classifier(x)
+            out[:, :, task] = classifier(x) #N c t
         return out

@@ -13,6 +13,7 @@ from typing import Any, Optional, Tuple, Union, Sequence
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import os
 
 from resnet import resnet18, resnet50
 from modules import MLP, MultiTaskModel
@@ -31,17 +32,47 @@ BIOVIL_IMAGE_WEIGHTS_URL = f"{REPO_URL}/resolve/{CXR_BERT_COMMIT_TAG}/{BIOVIL_IM
 BIOVIL_IMAGE_WEIGHTS_MD5 = "02ce6ee460f72efd599295f440dbb453"
 
 
-def get_biovil_resnet(pretrained: bool = True) -> ImageModel:
+def get_biovil_resnet(pretrained: bool = True, eval=False) -> ImageModel:
     """Download weights from Hugging Face and instantiate the image model."""
     resnet_checkpoint_path = '/n/data2/hms/dbmi/beamlab/anil/Med_ImageText_Embedding/models/biovil_image_resnet50_proj_size_128.pt'
+    image_model = ImageModel(
+        img_model_type=MODEL_TYPE,
+        joint_feature_size=JOINT_FEATURE_SIZE,
+        pretrained_model_path=resnet_checkpoint_path if pretrained else None
+    )
+    return image_model
 
+def getCNN(pretrained: bool = False, num_heads = 5, loadpath=None, loadmodel='best_model.pt', freeze=False, eval=True, classifier=False) -> ImageModel:
+    resnet_checkpoint_path = '/n/data2/hms/dbmi/beamlab/anil/Med_ImageText_Embedding/models/biovil_image_resnet50_proj_size_128.pt'
     image_model = ImageModel(
         img_model_type=MODEL_TYPE,
         joint_feature_size=JOINT_FEATURE_SIZE,
         pretrained_model_path=resnet_checkpoint_path if pretrained else None,
+        num_classes= num_heads,
+        freeze_encoder=freeze,
+        classifier_hidden_dim=128,
+        num_tasks=1,
+        project= True
     )
-    return image_model
+    if loadpath:
+        if loadmodel == '':
+            checkpoint = torch.load(loadpath, map_location = device)
+        else:
+            checkpoint = torch.load(os.path.join(loadpath, loadmodel), map_location=device)
+        image_model.load_state_dict(checkpoint['model_state_dict'], strict=False)
 
+
+    if freeze:
+        image_model.freeze_encoder = True
+    else:
+        image_model.freeze_encoder = False
+
+
+    image_model.downstream_classifier_kwargs['project'] = True
+    if classifier or (not ('cnn' in loadpath) and ('fine' not in loadpath + loadmodel) and ('Fine' not in loadpath + loadmodel)):
+        image_model.classifier = image_model.create_downstream_classifier()
+
+    return image_model
 
 @enum.unique
 class ResnetType(str, enum.Enum):
@@ -55,6 +86,34 @@ class ImageModelOutput():
     projected_global_embedding: torch.Tensor
     class_logits: torch.Tensor
     projected_patch_embeddings: torch.Tensor
+    pool_weights: torch.Tensor
+
+#Trying it out...
+class AttentionPooler(nn.Module):
+    def __init__(self, joint_featsize=128, patch_size=49):
+        super().__init__()
+        self.patch_size = patch_size
+        self.patch_weighting = MLP(input_dim=joint_featsize, output_dim=patch_size, hidden_dim=None, use_1x1_convs=True)
+
+    def forward(self, projected_patches, targetEmbedding):
+        N,E,p1,p2 = projected_patches.shape
+        avg_patch = projected_patches.mean(dim=(2,3)).reshape(N, E, 1, 1) #N E 1 1
+        avg_embedding = projected_patches.mean(dim=0).reshape(1, E, p1, p2) #1 E p1 p2
+        avg_embedding = (avg_embedding/avg_embedding.norm(dim=1, keepdim=True)).repeat(N, 1, 1, 1) #N E p1 p2
+        projected_patches = projected_patches-avg_embedding
+        projected_patches = projected_patches/projected_patches.norm(dim=1, keepdim=True)
+
+        if targetEmbedding is None:
+            targetEmbedding = avg_patch
+        avgpooled = targetEmbedding.reshape(N, E, 1, 1)  # N E 1 1
+        poolweightinput = avgpooled
+        poolweights = self.patch_weighting(poolweightinput) #N P
+        poolweights = poolweights.reshape(N, 1, p1, p2).repeat(1,E, 1, 1)
+
+        attn_weighted = poolweights * projected_patches
+        attn_weighted = torch.sum(attn_weighted, dim=(2, 3)).reshape(N, E, 1, 1)
+        attn_weighted = attn_weighted / attn_weighted.norm(dim=1, keepdim=True)
+        return attn_weighted.reshape(N, E), poolweights.abs()
 
 class ImageModel(nn.Module):
     """Image encoder module"""
@@ -73,43 +132,61 @@ class ImageModel(nn.Module):
         self.projector = MLP(input_dim=self.feature_size, output_dim=joint_feature_size,
                              hidden_dim=joint_feature_size, use_1x1_convs=True)
         self.downstream_classifier_kwargs = downstream_classifier_kwargs
+        print(self.downstream_classifier_kwargs)
         self.classifier = self.create_downstream_classifier() if downstream_classifier_kwargs else None
 
         # Initialise the mode of modules
         self.freeze_encoder = freeze_encoder
+        self.dropout = nn.Dropout(0.1)
         self.train()
+        self.global_pooler = None
 
         if pretrained_model_path is not None:
             if not isinstance(pretrained_model_path, (str, Path)):
                 raise TypeError(f"Expected a string or Path, got {type(pretrained_model_path)}")
             state_dict = torch.load(pretrained_model_path, map_location=device)
-            self.load_state_dict(state_dict)
+            try:
+                self.load_state_dict(state_dict, strict=False)
+            except:
+                self.encoder.load_state_dict(state_dict, strict=False)
 
     def train(self, mode: bool = True) -> Any:
         """Switch the model between training and evaluation modes."""
         super().train(mode=mode)
         if self.freeze_encoder:
             self.encoder.train(mode=False)
-            self.projector.train(mode=False)
+            #self.projector.train(mode=False)
         return self
 
-    def forward(self, x: torch.Tensor) -> ImageModelOutput:
-        with torch.set_grad_enabled(not self.freeze_encoder):
-            patch_x, pooled_x = self.encoder(x, return_patch_embeddings=True)
-            projected_patch_embeddings = self.projector(patch_x)
-            projected_global_embedding = torch.mean(projected_patch_embeddings, dim=(2, 3))
+    def forward(self, x: torch.Tensor, guiding_embedding = None) -> ImageModelOutput:
+        patch_x, pooled_x = self.encoder(x, return_patch_embeddings=True)
+        projected_patch_embeddings = self.projector(patch_x)
+        if self.global_pooler is not None:
+            projected_global_embedding, pool_weights = self.global_pooler(projected_patch_embeddings, guiding_embedding) #Tried out non avg pool
+        else:
+            projected_global_embedding = torch.mean(projected_patch_embeddings, dim=(2, 3)) #All models are doing this
+            pool_weights = None
 
-        logits = self.classifier(pooled_x) if self.classifier else None
+        if 'project' in self.downstream_classifier_kwargs.keys() and self.downstream_classifier_kwargs['project']:
+            proj = self.dropout(projected_global_embedding) #Newer version classify from the projected global embedding
+        else:
+            proj = self.dropout(pooled_x) #Old versions classify from the unprojected global embedding
+
+        logits = self.classifier(proj) if self.classifier else None
         return ImageModelOutput(img_embedding=pooled_x,
                                 patch_embedding=patch_x,
                                 class_logits=logits,
                                 projected_patch_embeddings=projected_patch_embeddings,
-                                projected_global_embedding=projected_global_embedding)
+                                projected_global_embedding=projected_global_embedding,
+                                pool_weights = pool_weights)
 
     def create_downstream_classifier(self, **kwargs: Any) -> MultiTaskModel:
         """Create the classification module for the downstream task."""
         downstream_classifier_kwargs = kwargs if kwargs else self.downstream_classifier_kwargs
-        return MultiTaskModel(self.feature_size, **downstream_classifier_kwargs)
+        if 'project' not in downstream_classifier_kwargs.keys() or not downstream_classifier_kwargs['project']:
+            return MultiTaskModel(self.feature_size, **downstream_classifier_kwargs)
+        elif downstream_classifier_kwargs['project']:
+            return MultiTaskModel(JOINT_FEATURE_SIZE, **downstream_classifier_kwargs)
 
     @torch.no_grad()
     def get_patchwise_projected_embeddings(self, input_img: torch.Tensor, normalize: bool) -> torch.Tensor:

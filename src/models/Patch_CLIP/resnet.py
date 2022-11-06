@@ -17,6 +17,7 @@ class ResNetHIML(ResNet):
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
+        self.block_ind=3
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x0 = self.conv1(x)
@@ -25,11 +26,20 @@ class ResNetHIML(ResNet):
         x0 = self.maxpool(x0)
 
         x1 = self.layer1(x0)
-        x2 = self.layer2(x1)
-        x3 = self.layer3(x2)
-        x4 = self.layer4(x3)
+        if self.block_ind == 0:
+            return x1
 
+        x2 = self.layer2(x1)
+        if self.block_ind == 1:
+            return x2
+
+        x3 = self.layer3(x2)
+        if self.block_ind == 2:
+            return x3
+
+        x4 = self.layer4(x3)
         return x4
+
 
 def _resnet(arch: str, block: Type[Union[BasicBlock, Bottleneck]], layers: List[int],
             pretrained: bool, progress: bool, **kwargs: Any) -> ResNetHIML:

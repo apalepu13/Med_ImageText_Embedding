@@ -89,7 +89,7 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model_path', type=str, default='/n/data2/hms/dbmi/beamlab/anil/Med_ImageText_Embedding/models/local_je_model/exp1/', help='path for saving trained models')
+    parser.add_argument('--model_path', type=str, default='/n/data2/hms/dbmi/beamlab/anil/Med_ImageText_Embedding/models/clip_regularized/exp1/', help='path for saving trained models')
     parser.add_argument('--model', type=str, default='best_model.pt', help='path from root to model')
     parser.add_argument('--synthetic', type=bool, default=False)
     parser.add_argument('--embed_size', type=int, default=128, help='dimension of word embedding vectors')

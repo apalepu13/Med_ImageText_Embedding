@@ -15,12 +15,13 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 def main(args):
     resultDir = args.results_dir
-    dat = MedDataHelpers.getDatasets(source = 'mimic_cxr', subset = ['test'], frontal=True)
+    dat = MedDataHelpers.getDatasets(source = 'mimic_cxr', subset = ['test'], frontal=True, filters=['impression'])
     dl = MedDataHelpers.getLoaders(dat, shuffle=False)
     dl = dl['test']
 
+    unreg_model = CLIP_Embedding.getCLIPModel(args.je_model_path_unreg).to(device)
     clip_model = CLIP_Embedding.getCLIPModel(args.je_model_path).to(device)
-    soft = nn.Softmax(dim=2)
+    soft = nn.Softmax(dim=1)
 
     with torch.no_grad():
         for i, samples in enumerate(dl):
@@ -36,55 +37,103 @@ def main(args):
                 img[:, 2, :, :] = (img[:, 2, :, :] * .225) + .406
                 img = img.permute(0, 2, 3, 1).squeeze()
 
+            unreg_im = unreg_model.get_im_embeddings(ims, only_patches=True)
+            unreg_embeds = unreg_model.get_text_embeddings(text, only_words=True)
+            unreg_cross_weights = unreg_model.get_cross_weights(unreg_im, unreg_embeds)[0]
+            #unreg_cross_weights = soft(unreg_cross_weights)
+
+
             token_im = clip_model.get_im_embeddings(ims, only_patches = True)
             token_embeds = clip_model.get_text_embeddings(text, only_words=True)
             cross_weights_text = clip_model.get_cross_weights(token_im, token_embeds)[0]
-            cross_weights_text = soft(cross_weights_text)
+            #cross_weights_text = soft(cross_weights_text)
 
             cwt = cross_weights_text.shape
+            print(cwt)
             maxlen = 256
             if cwt[1] < maxlen:
                 cross_weights_text = torch.cat([cross_weights_text, -2 * torch.ones(cwt[0], maxlen-cwt[1], cwt[2]).to(device)], dim=1)
                 cross_weights_text[cross_weights_text == -2] = float('nan')
+
+                unreg_cross_weights = torch.cat([unreg_cross_weights, -2 * torch.ones(cwt[0], maxlen-cwt[1], cwt[2]).to(device)], dim=1)
+                unreg_cross_weights[unreg_cross_weights == -2] = float('nan')
+
             if i == 0:
                 allattns = cross_weights_text
-                break
+                allunreg = unreg_cross_weights
             else:
+                if i == 10:
+                    break
                 allattns = torch.cat([allattns, cross_weights_text], dim=0) #D T P
+                allunreg = torch.cat([allunreg, unreg_cross_weights])
 
 
         for i in np.arange(allattns.shape[0]):
-            lol = allattns[i, :, :].squeeze().cpu()
-            tpmat = lol
-            plt.figure(figsize = (8, 8))
-            plt.imshow(img[i, :, :, :])
-            for x in range(7):
-                for y in range(7):
-                    plt.text(x * 32 + 16, y * 32 + 16, str(y * 7 + x), color='b')
-            plt.savefig(resultDir + args.je_model_path[-5:-1] + 'image.png')
-            plt.figure(figsize = (8, 8))
-            plt.imshow(tpmat[:150, :], cmap='plasma', interpolation='nearest')
-            plt.title("token-patch similarity, im: " + str(i))
-            plt.xlabel("Patch #")
-            plt.ylabel("Token #")
-            plt.savefig(resultDir + args.je_model_path[-5:-1] + 'simActivation.png')
-            #lol, indices = torch.sort(lol, dim=1, descending=True) #T P
+            #lol = allattns[i, :, :].squeeze().cpu()
+            lol = allattns[:, 0, :].squeeze().cpu()
+            lolunreg = allunreg[:, 0, :].squeeze().cpu()
+
+            lolnew = lol/(lol.sum(dim=1)[:, None].repeat(1, 49))
+            lolunregnew = lolunreg / (lolunreg.sum(dim=1)[:, None].repeat(1, 49))
+
+
+            #tpmat = lol
+            #plt.figure(figsize = (8, 8))
+            #plt.imshow(img[i, :, :, :])
+            #for x in range(7):
+            #    for y in range(7):
+            #        plt.text(x * 32 + 16, y * 32 + 16, str(y * 7 + x), color='b')
+            #plt.savefig(resultDir + args.je_model_path[-5:-1] + 'image.png')
+            #plt.figure(figsize = (8, 8))
+            #plt.imshow(tpmat, cmap='plasma', interpolation='nearest')
+            #plt.title("token-patch similarity, im: " + str(i))
+            #plt.xlabel("Patch #")
+            #plt.ylabel("Token #")
+            #plt.savefig(resultDir + args.je_model_path[-5:-1] + 'simActivation.png')
+            lol, indices = torch.sort(lol, dim=1, descending=True) #T P
+            lolunreg, indicesunreg = torch.sort(lolunreg, dim=1, descending=True)
             descending_attn_means = np.nanmean(lol, axis=0)
             descending_attn_stds = np.nanstd(lol, axis=0)
-            fig, ax = plt.subplots(1, 1, figsize=(8,8))
-            ax.errorbar(np.arange(descending_attn_means.shape[0]), descending_attn_means, yerr = descending_attn_stds, linestyle='')
-            for k, txt in enumerate(np.arange(49).astype(str)):
-                ax.annotate(txt, (k, descending_attn_means[k]))
-            ax.set_title("Image " + str(i))
-            ax.set_xlabel("Patch #")
-            ax.set_ylabel("mean/std token similarity")
-            plt.savefig(resultDir + args.je_model_path[-5:-1] + 'tokenprobs.png')
+            descending_attn_means_unreg = np.nanmean(lolunreg, axis=0)
+            descending_attn_stds_unreg = np.nanstd(lolunreg, axis=0)
+            fig, ax = plt.subplots(1, 1, figsize=(6,6))
+            ax.errorbar(np.arange(descending_attn_means.shape[0]), descending_attn_means, yerr = descending_attn_stds, fmt='.', linestyle='', ecolor='b', label="Regularized")
+            ax.errorbar(np.arange(descending_attn_means_unreg.shape[0]), descending_attn_means_unreg, yerr=descending_attn_stds_unreg, fmt='.',
+                        linestyle='', ecolor='r', label="Unregularized")
+            #for k, txt in enumerate(np.arange(49).astype(str)):
+            #    ax.annotate(txt, (k, descending_attn_means[k]))
+            ax.set_title("Rank-ordered patch similarities", size=18)
+            ax.set_xlabel("Rank-ordered patch #", size=16)
+            ax.set_ylabel("Patch similarities to CLS text embedding", size=16)
+            ax.legend(prop={'size': 16})
+            plt.savefig(resultDir + args.je_model_path[-5:-1] + 'raw_sim.png', bbox_inches='tight')
+
+            lolnew, indices = torch.sort(lolnew, dim=1, descending=True)  # T P
+            lolunregnew, indicesunreg = torch.sort(lolunregnew, dim=1, descending=True)
+            descending_attn_means = np.nanmean(lolnew, axis=0)
+            descending_attn_stds = np.nanstd(lolnew, axis=0)
+            descending_attn_means_unreg = np.nanmean(lolunregnew, axis=0)
+            descending_attn_stds_unreg = np.nanstd(lolunregnew, axis=0)
+            fig, ax = plt.subplots(1, 1, figsize=(6, 6))
+            ax.errorbar(np.arange(descending_attn_means.shape[0]), descending_attn_means, yerr=descending_attn_stds,
+                        fmt='.', linestyle='', ecolor='b', label="Regularized")
+            ax.errorbar(np.arange(descending_attn_means_unreg.shape[0]), descending_attn_means_unreg,
+                        yerr=descending_attn_stds_unreg, fmt='.',
+                        linestyle='', ecolor='r', label="Unregularized")
+            # for k, txt in enumerate(np.arange(49).astype(str)):
+            #    ax.annotate(txt, (k, descending_attn_means[k]))
+            ax.set_title("Rank-ordered relative patch importance", size=18)
+            ax.set_xlabel("Rank-ordered patch #", size=16)
+            ax.set_ylabel("Similarity/Total Similarity", size=16)
+            ax.legend(prop={'size': 16})
+            plt.savefig(resultDir + args.je_model_path[-5:-1] + 'relative_sim.png', bbox_inches='tight')
             break
 
 
 if __name__ == '__main__': #7, 8, 9 = norm, patch, both
     parser = argparse.ArgumentParser()
-    parser.add_argument('--je_model_path', type=str, default='/n/data2/hms/dbmi/beamlab/anil/Med_ImageText_Embedding/models/clip_regularized/exp8/', help='path for saving trained models')
+    parser.add_argument('--je_model_path_unreg', type=str, default='/n/data2/hms/dbmi/beamlab/anil/Med_ImageText_Embedding/models/clip_regularized/exp3/')
+    parser.add_argument('--je_model_path', type=str, default='/n/data2/hms/dbmi/beamlab/anil/Med_ImageText_Embedding/models/clip_regularized/exp2/', help='path for saving trained models')
     parser.add_argument('--embed_size', type=int, default=128, help='dimension of word embedding vectors')
     parser.add_argument('--batch_size', type=int, default=32) #32 normally
     parser.add_argument('--results_dir',type=str, default='/n/data2/hms/dbmi/beamlab/anil/Med_ImageText_Embedding/results/attn/')
