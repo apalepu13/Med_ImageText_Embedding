@@ -120,7 +120,7 @@ def clip_loss(im_logits, aug_logits = None, loss_weight = 1, criterion = nn.Cros
     assert len(losses) == int((len(im_logits) + (len(im_logits) * (len(im_logits) -1)/2.0)))
     return clip_loss, losses
 
-def compute_loss(je_model, samples, args, attn_lam_words = 0.0, attn_lam_patches = 0.0, pool_loss=False):
+def compute_loss(je_model, samples, args, attn_lam_words = 0.0, attn_lam_patches = 0.0):
     ims = samples['images']
     texts = samples['texts']
     pool_loss = None
@@ -450,17 +450,12 @@ def get_all_preds(DL, mod=None,similarity=False,im_embeds=False,patch_similarity
                 list_im_embeds = mod.get_im_embeddings(images, only_ims = True)
                 list_im_embeds = [im_embeds/im_embeds.norm(dim=1, keepdim=True) for im_embeds in list_im_embeds]
                 # N P E x c E = N c
-                #predictor_embeds = torch.subtract(label_embeds, neg_label_embeds)
-                ##predictor_embeds = predictor_embeds / predictor_embeds.norm(dim=1, keepdim=True)
-                #label_embeds = predictor_embeds
                 list_preds = [im_embeds @ label_embeds.t() for im_embeds in list_im_embeds]  # N c
 
                 if normalization:
                     list_neg_preds = [im_embeds @ neg_label_embeds.t() for im_embeds in list_im_embeds] #N c
                     for i, sim_preds in enumerate(list_preds):
                         list_preds[i] = list_preds[i]- list_neg_preds[i] # if just subtraction
-                        #list_preds[i] = torch.stack([list_preds[i][:, :, None], list_neg_preds[i][:, :, None]], dim=2) #N C 2
-                        #list_preds[i] = torch.nn.Softmax(dim=2)(list_preds[i])[:, :, 0].squeeze(dim=2) #N C 1
 
             elif patch_similarity:
                 list_im_embeds = mod.get_im_embeddings(images, only_patches=True) #N E P1 P2
