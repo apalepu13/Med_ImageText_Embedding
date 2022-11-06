@@ -161,7 +161,6 @@ def train(train_data_loader, je_model, args, epoch, optimizer, total_step_mimic=
     if lam_patch < 0:
         lam_patch = args.lam_patches
 
-    je_model.freezeAttention(True)
     je_model.train(True)
     for i, samples in enumerate(train_data_loader):
         je_model.zero_grad(set_to_none=True)
